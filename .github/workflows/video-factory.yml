@@ -1,0 +1,82 @@
+name: ShockRadar Video Factory (FFmpeg + YT Shorts + IG Reels)
+on:
+  workflow_dispatch:
+    inputs:
+      job_id: { required: true, type: string }
+      targets: { required: true, type: string }
+      card_png_url: { required: true, type: string }
+      hook_text: { required: true, type: string }
+      caption: { required: true, type: string }
+      yt_title: { required: true, type: string }
+      callback_url: { required: true, type: string }
+      ig_creds_b64: { required: false, type: string, default: '' }
+      yt_creds_b64: { required: false, type: string, default: '' }
+permissions:
+  contents: write
+jobs:
+  render-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install FFmpeg & Python Deps
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-dejavu-core
+          pip install -q requests google-auth google-api-python-client
+      - name: Render Vertical 9:16 Video
+        env:
+          CARD_URL: ${{ inputs.card_png_url }}
+          HOOK_TEXT: ${{ inputs.hook_text }}
+        run: |
+          curl -sL "$CARD_URL" -o card.png
+          MUSIC=$(find music -type f -name '*.mp3' 2>/dev/null | shuf -n 1 || true)
+          SAFE_HOOK=$(echo "$HOOK_TEXT" | sed "s/'/\\\\'/g" | fold -s -w 28)
+          if [ -n "$MUSIC" ]; then
+            ffmpeg -y -loop 1 -i card.png -i "$MUSIC" -t 12 -vf "scale=1080:1920,zoompan=z='min(zoom+0.0012,1.12)':d=300:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text='$SAFE_HOOK':fontcolor=white:fontsize=54:box=1:boxcolor=black@0.55:boxborderw=20:x=(w-text_w)/2:y=150" -af "afade=t=in:st=0:d=1,afade=t=out:st=10:d=2" -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest output.mp4
+          else
+            ffmpeg -y -loop 1 -i card.png -f lavfi -i anullsrc=r=44100:cl=stereo -t 12 -vf "scale=1080:1920,zoompan=z='min(zoom+0.0012,1.12)':d=300:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text='$SAFE_HOOK':fontcolor=white:fontsize=54:box=1:boxcolor=black@0.55:boxborderw=20:x=(w-text_w)/2:y=150" -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest output.mp4
+          fi
+      - name: Publish & Callback
+        env:
+          JOB_ID: ${{ inputs.job_id }}
+          TARGETS: ${{ inputs.targets }}
+          CAPTION: ${{ inputs.caption }}
+          YT_TITLE: ${{ inputs.yt_title }}
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          IG_CREDS_B64: ${{ inputs.ig_creds_b64 }}
+          YT_CREDS_B64: ${{ inputs.yt_creds_b64 }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          CB_SECRET: ${{ secrets.GH_CALLBACK_SECRET }}
+        run: |
+          python3 - << 'EOF'
+          import os, json, base64, time, requests
+          from google.oauth2.credentials import Credentials
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+          targets = [t.strip() for t in os.environ['TARGETS'].split(',')]
+          yt_url, ig_url, err = '', '', ''
+          if 'yt' in targets and os.environ['YT_CREDS_B64']:
+              try:
+                  c = json.loads(base64.b64decode(os.environ['YT_CREDS_B64']).decode())
+                  creds = Credentials(None, refresh_token=c['refreshToken'], token_uri='https://oauth2.googleapis.com/token', client_id=c['clientId'], client_secret=c['clientSecret'])
+                  yt = build('youtube', 'v3', credentials=creds)
+                  resp = yt.videos().insert(part='snippet,status', body={'snippet': {'title': os.environ['YT_TITLE'][:95], 'description': os.environ['CAPTION'], 'categoryId': '22'}, 'status': {'privacyStatus': 'public', 'selfDeclaredMadeForKids': False}}, media_body=MediaFileUpload('output.mp4', mimetype='video/mp4', resumable=True)).execute()
+                  yt_url = f"https://youtube.com/shorts/{resp['id']}"
+              except Exception as e: err += f'YT: {e} | '
+          if 'ig' in targets and os.environ['IG_CREDS_B64']:
+              try:
+                  c = json.loads(base64.b64decode(os.environ['IG_CREDS_B64']).decode())
+                  h = {'Authorization': f"Bearer {os.environ['GH_TOKEN']}", 'Accept': 'application/vnd.github+json'}
+                  rel = requests.post(f"https://api.github.com/repos/{os.environ['GH_REPO']}/releases", headers=h, json={'tag_name': os.environ['JOB_ID'], 'name': os.environ['JOB_ID']}).json()
+                  up = rel['upload_url'].split('{')[0] + '?name=output.mp4'
+                  with open('output.mp4', 'rb') as f: asset = requests.post(up, headers={**h, 'Content-Type': 'video/mp4'}, data=f.read()).json()
+                  cr = requests.post(f"https://graph.facebook.com/v21.0/{c['igUserId']}/media", json={'media_type': 'REELS', 'video_url': asset['browser_download_url'], 'caption': os.environ['CAPTION'], 'access_token': c['accessToken']}).json()
+                  cid = cr['id']
+                  for _ in range(18):
+                      time.sleep(5)
+                      if requests.get(f"https://graph.facebook.com/v21.0/{cid}?fields=status_code&access_token={c['accessToken']}").json().get('status_code') == 'FINISHED': break
+                  pub = requests.post(f"https://graph.facebook.com/v21.0/{c['igUserId']}/media_publish", json={'creation_id': cid, 'access_token': c['accessToken']}).json()
+                  ig_url = f"https://instagram.com/reel/{pub.get('id', '')}"
+              except Exception as e: err += f'IG: {e}'
+          requests.post(os.environ['CALLBACK_URL'], headers={'x-callback-secret': os.environ.get('CB_SECRET', '')}, json={'job_id': os.environ['JOB_ID'], 'status': 'done' if (yt_url or ig_url) else 'error', 'yt_url': yt_url, 'ig_url': ig_url, 'error': err})
+          EOF
