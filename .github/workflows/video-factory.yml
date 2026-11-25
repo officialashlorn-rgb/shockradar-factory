@@ -1,16 +1,10 @@
-name: ShockRadar Video Factory v5 (AI Voiceover + FFmpeg + Shorts & Reels)
+name: ShockRadar Video Factory v6 (3D Multi-Scene + Viral Subtitles + Voiceover)
 on:
   workflow_dispatch:
     inputs:
       job_id: { required: true, type: string }
       targets: { required: true, type: string }
-      card_png_url: { required: true, type: string }
-      hook_text: { required: true, type: string }
-      voice_script: { required: false, type: string, default: '' }
-      voice_name: { required: false, type: string, default: 'en-US-AndrewNeural' }
-      caption: { required: true, type: string }
-      yt_title: { required: true, type: string }
-      callback_url: { required: true, type: string }
+      payload_b64: { required: true, type: string }
       ig_creds_b64: { required: false, type: string, default: '' }
       yt_creds_b64: { required: false, type: string, default: '' }
 permissions:
@@ -23,66 +17,284 @@ jobs:
       - name: Install FFmpeg & Python Packages
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-dejavu-core
-          pip install -q edge-tts requests google-auth google-api-python-client
-      - name: Render 9:16 Video with AI Voiceover
+          pip install -q edge-tts pillow requests google-auth google-api-python-client
+      - name: Render Viral 9:16 Video (3D Story or PnL Proof)
         env:
-          CARD_URL: ${{ inputs.card_png_url }}
-          HOOK_TEXT: ${{ inputs.hook_text }}
-          VOICE_SCRIPT: ${{ inputs.voice_script }}
-          VOICE_NAME: ${{ inputs.voice_name }}
+          JOB_ID: ${{ inputs.job_id }}
+          PAYLOAD_B64: ${{ inputs.payload_b64 }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         run: |
           python3 - << 'PYEOF'
-          import os, glob, random, subprocess, textwrap, requests
-          r = requests.get(os.environ['CARD_URL'], timeout=30)
-          r.raise_for_status()
-          with open('card.png', 'wb') as f:
-              f.write(r.content)
-          hook = ' '.join(os.environ.get('HOOK_TEXT', 'AI Quant Setup Hit').split())
+          import os, io, json, glob, math, time, base64, random, asyncio, urllib.parse, subprocess, textwrap, requests
+          import edge_tts
+          from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+          payload = json.loads(base64.b64decode(os.environ['PAYLOAD_B64']).decode('utf-8'))
+          mode = payload.get('mode', 'pnl')
+          hook = ' '.join(str(payload.get('hook_text', 'Market Shock Explained')).split())
+          script = ' '.join(str(payload.get('voice_script', '')).split()) or hook
+          voice = payload.get('voice_name') or 'en-US-AndrewNeural'
+          card_url = payload.get('card_png_url', '')
+          scenes = payload.get('scenes') or []
+          pexels_key = (os.environ.get('PEXELS_API_KEY') or '').strip()
+
           with open('hook.txt', 'w', encoding='utf-8') as f:
-              f.write(textwrap.fill(hook, width=25))
-          script = ' '.join(os.environ.get('VOICE_SCRIPT', '').split()) or hook
-          voice = os.environ.get('VOICE_NAME') or 'en-US-AndrewNeural'
+              f.write(textwrap.fill(hook, width=24))
+
+          async def synth_voice_and_words(txt, vname):
+              comm = edge_tts.Communicate(txt, vname, rate='+7%')
+              words = []
+              with open('voice.mp3', 'wb') as out_f:
+                  async for chunk in comm.stream():
+                      ctype = chunk.get('type')
+                      if ctype == 'audio':
+                          out_f.write(chunk['data'])
+                      elif ctype == 'WordBoundary':
+                          s = chunk['offset'] / 10_000_000.0
+                          d = chunk['duration'] / 10_000_000.0
+                          w = str(chunk.get('text', '')).strip()
+                          if w:
+                              words.append((s, s + max(d, 0.12), w))
+              return words
+
+          words = []
           has_voice = False
-          dur = 11.5
+          voice_dur = 12.0 if mode == 'pnl' else 30.0
           try:
-              subprocess.run(['edge-tts', '--voice', voice, '--rate=+5%', '--text', script, '--write-media', 'voice.mp3'], check=True, timeout=45)
+              words = asyncio.run(synth_voice_and_words(script, voice))
               if os.path.exists('voice.mp3') and os.path.getsize('voice.mp3') > 1500:
                   has_voice = True
                   p = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', 'voice.mp3'], capture_output=True, text=True)
-                  vd = float(p.stdout.strip() or '10')
-                  dur = max(10.0, min(16.5, vd + 1.4))
+                  voice_dur = float(p.stdout.strip() or voice_dur)
           except Exception as e:
-              print('TTS fallback:', e)
+              print('TTS warning:', e)
+
+          total_dur = max(11.0, min(52.0, voice_dur + 1.3))
+
+          def fmt_ass_t(sec):
+              sec = max(0.0, float(sec))
+              h = int(sec // 3600)
+              m = int((sec % 3600) // 60)
+              s = int(sec % 60)
+              cs = int(round((sec - int(sec)) * 100))
+              if cs >= 100:
+                  s += 1
+                  cs = 0
+              return f'{h}:{m:02d}:{s:02d}.{cs:02d}'
+
+          def esc_ass(s):
+              return s.replace('\\', '').replace('{', '(').replace('}', ')').replace('\n', ' ')
+
+          if not words:
+              raw_w = [w for w in script.split() if w]
+              step = voice_dur / max(1, len(raw_w))
+              words = [(i * step, (i + 1) * step, w) for i, w in enumerate(raw_w)]
+
+          groups = []
+          cur = []
+          for item in words:
+              cur.append(item)
+              txt_len = sum(len(x[2]) for x in cur) + len(cur)
+              if len(cur) >= 3 or txt_len >= 17 or item[2].endswith(('.', '!', '?', ',')):
+                  groups.append((cur[0][0], cur[-1][1], ' '.join(x[2] for x in cur)))
+                  cur = []
+          if cur:
+              groups.append((cur[0][0], cur[-1][1], ' '.join(x[2] for x in cur)))
+
+          ass_header = '\n'.join([
+              '[Script Info]',
+              'ScriptType: v4.00+',
+              'PlayResX: 1080',
+              'PlayResY: 1920',
+              'WrapStyle: 2',
+              '',
+              '[V4+ Styles]',
+              'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
+              'Style: Viral,DejaVu Sans,74,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,1,0,1,7,3,2,60,60,390,1',
+              '',
+              '[Events]',
+              'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
+          ])
+          ev_lines = []
+          for idx_g, (st, en, gtxt) in enumerate(groups):
+              en_adj = groups[idx_g + 1][0] if idx_g + 1 < len(groups) else max(en + 0.35, voice_dur)
+              en_adj = max(st + 0.18, min(en_adj, total_dur))
+              clean_g = esc_ass(gtxt.upper())
+              if idx_g % 3 == 1:
+                  styled = '{\\c&H0047E3FF&}' + clean_g
+              elif idx_g % 3 == 2:
+                  styled = '{\\c&H0081F534&}' + clean_g
+              else:
+                  styled = clean_g
+              ev_lines.append(f'Dialogue: 0,{fmt_ass_t(st)},{fmt_ass_t(en_adj)},Viral,,0,0,0,,{styled}')
+          with open('subs.ass', 'w', encoding='utf-8') as f:
+              f.write(ass_header + '\n' + '\n'.join(ev_lines) + '\n')
+
+          def fit_vertical(img_bytes, out_path):
+              im = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+              if im.width < 200 or im.height < 200:
+                  raise ValueError('Image too small')
+              fitted = ImageOps.fit(im, (1080, 1920), method=Image.Resampling.LANCZOS)
+              overlay = Image.new('RGBA', (1080, 1920), (0, 0, 0, 0))
+              dr = ImageDraw.Draw(overlay)
+              for y in range(0, 380):
+                  alpha = int(175 * (1 - y / 380))
+                  dr.line([(0, y), (1080, y)], fill=(5, 7, 12, alpha))
+              for y in range(1320, 1920):
+                  alpha = int(205 * ((y - 1320) / 600))
+                  dr.line([(0, y), (1080, y)], fill=(5, 7, 12, alpha))
+              final = Image.alpha_composite(fitted.convert('RGBA'), overlay).convert('RGB')
+              final.save(out_path, 'JPEG', quality=92)
+
+          def make_fallback_frame(label, idx, out_path):
+              im = Image.new('RGB', (1080, 1920), (7, 11, 20))
+              dr = ImageDraw.Draw(im)
+              accent = (16, 185, 129) if idx % 2 == 0 else (244, 63, 94)
+              for y in range(0, 1920, 90):
+                  dr.line([(0, y), (1080, y)], fill=(20, 30, 48), width=1)
+              for x in range(0, 1080, 90):
+                  dr.line([(x, 0), (x, 1920)], fill=(20, 30, 48), width=1)
+              rng = random.Random(idx * 97 + 13)
+              cy = 1050
+              for i in range(16):
+                  bx = 90 + i * 58
+                  dy = rng.randint(-120, 120)
+                  ny = max(550, min(1350, cy + dy))
+                  c = (16, 185, 129) if ny < cy else (251, 113, 133)
+                  dr.line([(bx + 14, min(cy, ny) - 45), (bx + 14, max(cy, ny) + 45)], fill=c, width=4)
+                  dr.rectangle([(bx, min(cy, ny)), (bx + 28, max(cy, ny) + 12)], fill=c)
+                  cy = ny
+              dr.rounded_rectangle([(80, 740), (1000, 1020)], radius=32, fill=(11, 17, 32), outline=accent, width=4)
+              try:
+                  fnt = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 52)
+              except Exception:
+                  fnt = ImageFont.load_default()
+              wrapped = textwrap.fill(label or hook, width=22)
+              dr.multiline_text((540, 880), wrapped, fill=(248, 250, 252), font=fnt, anchor='mm', align='center', spacing=14)
+              im.save(out_path, 'JPEG', quality=92)
+
+          def fetch_scene_image(scene, idx, out_path):
+              prompt = str(scene.get('prompt', '')).strip()
+              kw = str(scene.get('keyword', 'finance wall street')).strip()
+              label = str(scene.get('label', hook)).strip()
+              seed = random.randint(1000, 999999)
+              for mdl in ('flux', 'turbo'):
+                  if not prompt:
+                      break
+                  try:
+                      u = f'https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}?width=768&height=1344&model={mdl}&nologo=true&seed={seed}'
+                      r = requests.get(u, timeout=35, headers={'User-Agent': 'Mozilla/5.0'})
+                      if r.ok and len(r.content) > 12000:
+                          fit_vertical(r.content, out_path)
+                          return True
+                  except Exception as e:
+                      print(f'Scene {idx} {mdl} retry:', e)
+              if pexels_key:
+                  try:
+                      pr = requests.get('https://api.pexels.com/v1/search', params={'query': kw, 'orientation': 'portrait', 'per_page': 5}, headers={'Authorization': pexels_key}, timeout=15)
+                      photos = pr.json().get('photos') or []
+                      if photos:
+                          purl = random.choice(photos)['src'].get('large2x') or photos[0]['src'].get('portrait')
+                          ir = requests.get(purl, timeout=20)
+                          if ir.ok and len(ir.content) > 12000:
+                              fit_vertical(ir.content, out_path)
+                              return True
+                  except Exception as e:
+                      print(f'Scene {idx} Pexels fallback:', e)
+              make_fallback_frame(label, idx, out_path)
+              return False
+
+          has_card = False
+          if card_url:
+              try:
+                  cr = requests.get(card_url, timeout=30)
+                  if cr.ok and len(cr.content) > 5000:
+                      with open('card.png', 'wb') as cf:
+                          cf.write(cr.content)
+                      has_card = True
+              except Exception as e:
+                  print('Card download warn:', e)
+          if not has_card:
+              make_fallback_frame('ShockRadar AI Quant', 0, 'card.png')
+
           music_files = glob.glob('music/*.mp3') + glob.glob('music/**/*.mp3', recursive=True)
           music = random.choice(music_files) if music_files else ''
-          frames = int(dur * 25) + 15
-          fade_out = max(1.0, dur - 1.5)
-          vf = (
-              f"scale=1080:1920:force_original_aspect_ratio=decrease,"
-              f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=#05070c,"
-              f"zoompan=z='min(zoom+0.0007,1.09)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps=25,"
-              f"drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:textfile=hook.txt:fontcolor=white:fontsize=50:line_spacing=12:box=1:boxcolor=black@0.68:boxborderw=22:x=(w-text_w)/2:y=115,"
-              f"drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text='Free 24h Live Trial - Link in Bio':fontcolor=#34d399:fontsize=34:box=1:boxcolor=#0b1120@0.88:boxborderw=18:x=(w-text_w)/2:y=h-185"
-          )
-          cmd = ['ffmpeg', '-y', '-loop', '1', '-i', 'card.png']
-          if has_voice and music:
-              cmd += ['-i', 'voice.mp3', '-stream_loop', '-1', '-i', music, '-filter_complex', f'[1:a]volume=1.18,apad[v];[2:a]volume=0.16,afade=t=in:st=0:d=0.8,afade=t=out:st={fade_out:.2f}:d=1.5[m];[v][m]amix=inputs=2:duration=longest[aout]', '-vf', vf, '-map', '0:v', '-map', '[aout]']
-          elif has_voice:
-              cmd += ['-i', 'voice.mp3', '-filter_complex', '[1:a]volume=1.15,apad[aout]', '-vf', vf, '-map', '0:v', '-map', '[aout]']
-          elif music:
-              cmd += ['-stream_loop', '-1', '-i', music, '-vf', vf, '-af', f'volume=0.55,afade=t=in:st=0:d=1,afade=t=out:st={fade_out:.2f}:d=1.5', '-map', '0:v', '-map', '1:a']
+          fade_out = max(1.0, total_dur - 1.5)
+
+          def add_audio_and_finalize(raw_video_path):
+              cmd = ['ffmpeg', '-y', '-i', raw_video_path]
+              if has_voice and music:
+                  cmd += ['-i', 'voice.mp3', '-stream_loop', '-1', '-i', music, '-filter_complex', f'[1:a]volume=1.20,apad[v];[2:a]volume=0.14,afade=t=in:st=0:d=0.8,afade=t=out:st={fade_out:.2f}:d=1.5[m];[v][m]amix=inputs=2:duration=longest[aout]', '-map', '0:v', '-map', '[aout]']
+              elif has_voice:
+                  cmd += ['-i', 'voice.mp3', '-filter_complex', '[1:a]volume=1.18,apad[aout]', '-map', '0:v', '-map', '[aout]']
+              elif music:
+                  cmd += ['-stream_loop', '-1', '-i', music, '-af', f'volume=0.55,afade=t=in:st=0:d=1,afade=t=out:st={fade_out:.2f}:d=1.5', '-map', '0:v', '-map', '1:a']
+              else:
+                  cmd += ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo', '-map', '0:v', '-map', '1:a']
+              cmd += ['-t', f'{total_dur:.2f}', '-c:v', 'libx264', '-crf', '24', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', 'output.mp4']
+              subprocess.run(cmd, check=True)
+
+          if mode == 'story' and len(scenes) >= 3:
+              end_dur = 3.8
+              story_dur = max(12.0, total_dur - end_dur)
+              n_sc = min(6, len(scenes))
+              xfade_d = 0.35
+              sc_dur = (story_dur + xfade_d * n_sc) / n_sc
+              clip_paths = []
+              clip_durs = []
+              for idx, sc in enumerate(scenes[:n_sc]):
+                  img_p = f'scene_{idx}.jpg'
+                  fetch_scene_image(sc, idx, img_p)
+                  clip_p = f'clip_{idx}.mp4'
+                  frames = max(30, int(math.ceil(sc_dur * 25)))
+                  if idx % 2 == 0:
+                      zp = f"zoompan=z='min(zoom+0.0011,1.14)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps=25"
+                  else:
+                      zp = f"zoompan=z='max(1.14-0.0011*on,1.0)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps=25"
+                  subprocess.run(['ffmpeg', '-y', '-loop', '1', '-i', img_p, '-vf', f'scale=1080:1920,{zp},format=yuv420p', '-t', f'{sc_dur:.2f}', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '22', clip_p], check=True)
+                  clip_paths.append(clip_p)
+                  clip_durs.append(sc_dur)
+
+              end_clip_dur = end_dur + xfade_d
+              end_frames = max(30, int(math.ceil(end_clip_dur * 25)))
+              subprocess.run(['ffmpeg', '-y', '-loop', '1', '-i', 'card.png', '-vf', f"scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=#05070c,zoompan=z='min(zoom+0.0008,1.07)':d={end_frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps=25,format=yuv420p", '-t', f'{end_clip_dur:.2f}', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '22', 'clip_end.mp4'], check=True)
+              clip_paths.append('clip_end.mp4')
+              clip_durs.append(end_clip_dur)
+
+              ff_in = []
+              for cp in clip_paths:
+                  ff_in += ['-i', cp]
+              fparts = []
+              prev_tag = '[0:v]'
+              offset = clip_durs[0] - xfade_d
+              for j in range(1, len(clip_paths)):
+                  out_tag = f'[xf{j}]'
+                  fparts.append(f'{prev_tag}[{j}:v]xfade=transition=fade:duration={xfade_d:.2f}:offset={max(0.1, offset):.2f}{out_tag}')
+                  prev_tag = out_tag
+                  offset += clip_durs[j] - xfade_d
+              fparts.append(
+                  f"{prev_tag}drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:textfile=hook.txt:fontcolor=white:fontsize=50:line_spacing=10:box=1:boxcolor=black@0.72:boxborderw=22:x=(w-text_w)/2:y=115:enable='lt(t,3.8)',"
+                  f"drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text='Free 24h AI Quant Trial - Link in Bio':fontcolor=#34d399:fontsize=32:box=1:boxcolor=#0b1120@0.85:boxborderw=16:x=(w-text_w)/2:y=h-155,ass=subs.ass[vout]"
+              )
+              subprocess.run(['ffmpeg', '-y', *ff_in, '-filter_complex', ';'.join(fparts), '-map', '[vout]', '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-pix_fmt', 'yuv420p', 'raw_video.mp4'], check=True)
+              add_audio_and_finalize('raw_video.mp4')
           else:
-              cmd += ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo', '-vf', vf, '-map', '0:v', '-map', '1:a']
-          cmd += ['-t', f'{dur:.2f}', '-c:v', 'libx264', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', 'output.mp4']
-          subprocess.run(cmd, check=True)
+              frames = int(total_dur * 25) + 20
+              vf = (
+                  f"scale=1080:1920:force_original_aspect_ratio=decrease,"
+                  f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=#05070c,"
+                  f"zoompan=z='min(zoom+0.0007,1.09)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps=25,"
+                  f"drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:textfile=hook.txt:fontcolor=white:fontsize=50:line_spacing=12:box=1:boxcolor=black@0.70:boxborderw=22:x=(w-text_w)/2:y=110,"
+                  f"drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text='Free 24h Live Trial - Link in Bio':fontcolor=#34d399:fontsize=34:box=1:boxcolor=#0b1120@0.88:boxborderw=18:x=(w-text_w)/2:y=h-175,ass=subs.ass"
+              )
+              subprocess.run(['ffmpeg', '-y', '-loop', '1', '-i', 'card.png', '-vf', vf, '-t', f'{total_dur:.2f}', '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-pix_fmt', 'yuv420p', 'raw_video.mp4'], check=True)
+              add_audio_and_finalize('raw_video.mp4')
           PYEOF
       - name: Publish & Callback
         env:
           JOB_ID: ${{ inputs.job_id }}
           TARGETS: ${{ inputs.targets }}
-          CAPTION: ${{ inputs.caption }}
-          YT_TITLE: ${{ inputs.yt_title }}
-          CALLBACK_URL: ${{ inputs.callback_url }}
+          PAYLOAD_B64: ${{ inputs.payload_b64 }}
           IG_CREDS_B64: ${{ inputs.ig_creds_b64 }}
           YT_CREDS_B64: ${{ inputs.yt_creds_b64 }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -94,18 +306,23 @@ jobs:
           from google.oauth2.credentials import Credentials
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
+          payload = json.loads(base64.b64decode(os.environ['PAYLOAD_B64']).decode('utf-8'))
           targets = [t.strip().lower() for t in os.environ['TARGETS'].split(',') if t.strip()]
-          yt_url, ig_url, video_url, err = '', '', '', ''
+          caption = payload.get('caption', '')
+          yt_title = payload.get('yt_title', 'ShockRadar AI #shorts')
+          callback_url = payload.get('callback_url', '')
+          cb_token = payload.get('cb_token', '')
+          yt_url, ig_url, video_url, asset_api_url, err = '', '', '', '', ''
           def upload_release_mp4():
               h = {'Authorization': f"Bearer {os.environ['GH_TOKEN']}", 'Accept': 'application/vnd.github+json'}
               rel = requests.post(f"https://api.github.com/repos/{os.environ['GH_REPO']}/releases", headers=h, json={'tag_name': os.environ['JOB_ID'], 'name': os.environ['JOB_ID']}).json()
               up = rel['upload_url'].split('{')[0] + '?name=output.mp4'
               with open('output.mp4', 'rb') as f:
                   asset = requests.post(up, headers={**h, 'Content-Type': 'video/mp4'}, data=f.read()).json()
-              return asset.get('browser_download_url', '')
+              return asset.get('browser_download_url', ''), asset.get('url', '')
           if 'preview' in targets or ('ig' in targets and os.environ.get('IG_CREDS_B64')):
               try:
-                  video_url = upload_release_mp4()
+                  video_url, asset_api_url = upload_release_mp4()
               except Exception as e:
                   err += f'REL: {e} | '
           if 'yt' in targets and os.environ.get('YT_CREDS_B64'):
@@ -113,16 +330,16 @@ jobs:
                   c = json.loads(base64.b64decode(os.environ['YT_CREDS_B64']).decode())
                   creds = Credentials(None, refresh_token=c['refreshToken'], token_uri='https://oauth2.googleapis.com/token', client_id=c['clientId'], client_secret=c['clientSecret'])
                   yt = build('youtube', 'v3', credentials=creds)
-                  resp = yt.videos().insert(part='snippet,status', body={'snippet': {'title': os.environ['YT_TITLE'][:95], 'description': os.environ['CAPTION'], 'categoryId': '22'}, 'status': {'privacyStatus': 'public', 'selfDeclaredMadeForKids': False}}, media_body=MediaFileUpload('output.mp4', mimetype='video/mp4', resumable=True)).execute()
+                  resp = yt.videos().insert(part='snippet,status', body={'snippet': {'title': yt_title[:95], 'description': caption, 'categoryId': '22'}, 'status': {'privacyStatus': 'public', 'selfDeclaredMadeForKids': False}}, media_body=MediaFileUpload('output.mp4', mimetype='video/mp4', resumable=True)).execute()
                   yt_url = f"https://youtube.com/shorts/{resp['id']}"
               except Exception as e:
                   err += f'YT: {e} | '
           if 'ig' in targets and os.environ.get('IG_CREDS_B64') and video_url:
               try:
                   c = json.loads(base64.b64decode(os.environ['IG_CREDS_B64']).decode())
-                  cr = requests.post(f"https://graph.facebook.com/v21.0/{c['igUserId']}/media", json={'media_type': 'REELS', 'video_url': video_url, 'caption': os.environ['CAPTION'], 'access_token': c['accessToken']}).json()
+                  cr = requests.post(f"https://graph.facebook.com/v21.0/{c['igUserId']}/media", json={'media_type': 'REELS', 'video_url': video_url, 'caption': caption, 'access_token': c['accessToken']}).json()
                   cid = cr['id']
-                  for _ in range(20):
+                  for _ in range(24):
                       time.sleep(5)
                       st = requests.get(f"https://graph.facebook.com/v21.0/{cid}?fields=status_code&access_token={c['accessToken']}").json().get('status_code')
                       if st == 'FINISHED': break
@@ -131,6 +348,9 @@ jobs:
                   ig_url = f"https://instagram.com/reel/{pub.get('id', '')}"
               except Exception as e:
                   err += f'IG: {e}'
-          ok = bool(yt_url or ig_url or ('preview' in targets and video_url))
-          requests.post(os.environ['CALLBACK_URL'], headers={'x-callback-secret': os.environ.get('CB_SECRET', '')}, json={'job_id': os.environ['JOB_ID'], 'status': 'done' if ok else 'error', 'yt_url': yt_url, 'ig_url': ig_url, 'video_url': video_url, 'error': err})
+          ok = bool(yt_url or ig_url or ('preview' in targets and (video_url or asset_api_url)))
+          cb_headers = {'x-callback-secret': os.environ.get('CB_SECRET', ''), 'x-cb-token': cb_token}
+          cb_body = {'job_id': os.environ['JOB_ID'], 'mode': payload.get('mode', 'pnl'), 'style_name': payload.get('style_name', ''), 'cb_token': cb_token, 'status': 'done' if ok else 'error', 'yt_url': yt_url, 'ig_url': ig_url, 'video_url': video_url, 'asset_api_url': asset_api_url, 'error': err}
+          res = requests.post(callback_url, headers=cb_headers, json=cb_body, timeout=30)
+          print('Callback HTTP:', res.status_code, res.text[:200])
           PYEOF
