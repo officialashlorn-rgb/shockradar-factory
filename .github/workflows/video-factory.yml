@@ -1,4 +1,4 @@
-name: ShockRadar Video Factory (FFmpeg + YT Shorts + IG Reels)
+name: ShockRadar Video Factory v5 (AI Voiceover + FFmpeg + Shorts & Reels)
 on:
   workflow_dispatch:
     inputs:
@@ -6,6 +6,8 @@ on:
       targets: { required: true, type: string }
       card_png_url: { required: true, type: string }
       hook_text: { required: true, type: string }
+      voice_script: { required: false, type: string, default: '' }
+      voice_name: { required: false, type: string, default: 'en-US-AndrewNeural' }
       caption: { required: true, type: string }
       yt_title: { required: true, type: string }
       callback_url: { required: true, type: string }
@@ -18,23 +20,62 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install FFmpeg & Python Deps
+      - name: Install FFmpeg & Python Packages
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-dejavu-core
-          pip install -q requests google-auth google-api-python-client
-      - name: Render Vertical 9:16 Video
+          pip install -q edge-tts requests google-auth google-api-python-client
+      - name: Render 9:16 Video with AI Voiceover
         env:
           CARD_URL: ${{ inputs.card_png_url }}
           HOOK_TEXT: ${{ inputs.hook_text }}
+          VOICE_SCRIPT: ${{ inputs.voice_script }}
+          VOICE_NAME: ${{ inputs.voice_name }}
         run: |
-          curl -sL "$CARD_URL" -o card.png
-          MUSIC=$(find music -type f -name '*.mp3' 2>/dev/null | shuf -n 1 || true)
-          SAFE_HOOK=$(echo "$HOOK_TEXT" | sed "s/'/\\\\'/g" | fold -s -w 28)
-          if [ -n "$MUSIC" ]; then
-            ffmpeg -y -loop 1 -i card.png -i "$MUSIC" -t 12 -vf "scale=1080:1920,zoompan=z='min(zoom+0.0012,1.12)':d=300:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text='$SAFE_HOOK':fontcolor=white:fontsize=54:box=1:boxcolor=black@0.55:boxborderw=20:x=(w-text_w)/2:y=150" -af "afade=t=in:st=0:d=1,afade=t=out:st=10:d=2" -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest output.mp4
-          else
-            ffmpeg -y -loop 1 -i card.png -f lavfi -i anullsrc=r=44100:cl=stereo -t 12 -vf "scale=1080:1920,zoompan=z='min(zoom+0.0012,1.12)':d=300:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text='$SAFE_HOOK':fontcolor=white:fontsize=54:box=1:boxcolor=black@0.55:boxborderw=20:x=(w-text_w)/2:y=150" -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest output.mp4
-          fi
+          python3 - << 'PYEOF'
+          import os, glob, random, subprocess, textwrap, requests
+          r = requests.get(os.environ['CARD_URL'], timeout=30)
+          r.raise_for_status()
+          with open('card.png', 'wb') as f:
+              f.write(r.content)
+          hook = ' '.join(os.environ.get('HOOK_TEXT', 'AI Quant Setup Hit').split())
+          with open('hook.txt', 'w', encoding='utf-8') as f:
+              f.write(textwrap.fill(hook, width=25))
+          script = ' '.join(os.environ.get('VOICE_SCRIPT', '').split()) or hook
+          voice = os.environ.get('VOICE_NAME') or 'en-US-AndrewNeural'
+          has_voice = False
+          dur = 11.5
+          try:
+              subprocess.run(['edge-tts', '--voice', voice, '--rate=+5%', '--text', script, '--write-media', 'voice.mp3'], check=True, timeout=45)
+              if os.path.exists('voice.mp3') and os.path.getsize('voice.mp3') > 1500:
+                  has_voice = True
+                  p = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', 'voice.mp3'], capture_output=True, text=True)
+                  vd = float(p.stdout.strip() or '10')
+                  dur = max(10.0, min(16.5, vd + 1.4))
+          except Exception as e:
+              print('TTS fallback:', e)
+          music_files = glob.glob('music/*.mp3') + glob.glob('music/**/*.mp3', recursive=True)
+          music = random.choice(music_files) if music_files else ''
+          frames = int(dur * 25) + 15
+          fade_out = max(1.0, dur - 1.5)
+          vf = (
+              f"scale=1080:1920:force_original_aspect_ratio=decrease,"
+              f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=#05070c,"
+              f"zoompan=z='min(zoom+0.0007,1.09)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps=25,"
+              f"drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:textfile=hook.txt:fontcolor=white:fontsize=50:line_spacing=12:box=1:boxcolor=black@0.68:boxborderw=22:x=(w-text_w)/2:y=115,"
+              f"drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text='Free 24h Live Trial - Link in Bio':fontcolor=#34d399:fontsize=34:box=1:boxcolor=#0b1120@0.88:boxborderw=18:x=(w-text_w)/2:y=h-185"
+          )
+          cmd = ['ffmpeg', '-y', '-loop', '1', '-i', 'card.png']
+          if has_voice and music:
+              cmd += ['-i', 'voice.mp3', '-stream_loop', '-1', '-i', music, '-filter_complex', f'[1:a]volume=1.18,apad[v];[2:a]volume=0.16,afade=t=in:st=0:d=0.8,afade=t=out:st={fade_out:.2f}:d=1.5[m];[v][m]amix=inputs=2:duration=longest[aout]', '-vf', vf, '-map', '0:v', '-map', '[aout]']
+          elif has_voice:
+              cmd += ['-i', 'voice.mp3', '-filter_complex', '[1:a]volume=1.15,apad[aout]', '-vf', vf, '-map', '0:v', '-map', '[aout]']
+          elif music:
+              cmd += ['-stream_loop', '-1', '-i', music, '-vf', vf, '-af', f'volume=0.55,afade=t=in:st=0:d=1,afade=t=out:st={fade_out:.2f}:d=1.5', '-map', '0:v', '-map', '1:a']
+          else:
+              cmd += ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo', '-vf', vf, '-map', '0:v', '-map', '1:a']
+          cmd += ['-t', f'{dur:.2f}', '-c:v', 'libx264', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', 'output.mp4']
+          subprocess.run(cmd, check=True)
+          PYEOF
       - name: Publish & Callback
         env:
           JOB_ID: ${{ inputs.job_id }}
@@ -48,35 +89,48 @@ jobs:
           GH_REPO: ${{ github.repository }}
           CB_SECRET: ${{ secrets.GH_CALLBACK_SECRET }}
         run: |
-          python3 - << 'EOF'
+          python3 - << 'PYEOF'
           import os, json, base64, time, requests
           from google.oauth2.credentials import Credentials
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
-          targets = [t.strip() for t in os.environ['TARGETS'].split(',')]
-          yt_url, ig_url, err = '', '', ''
-          if 'yt' in targets and os.environ['YT_CREDS_B64']:
+          targets = [t.strip().lower() for t in os.environ['TARGETS'].split(',') if t.strip()]
+          yt_url, ig_url, video_url, err = '', '', '', ''
+          def upload_release_mp4():
+              h = {'Authorization': f"Bearer {os.environ['GH_TOKEN']}", 'Accept': 'application/vnd.github+json'}
+              rel = requests.post(f"https://api.github.com/repos/{os.environ['GH_REPO']}/releases", headers=h, json={'tag_name': os.environ['JOB_ID'], 'name': os.environ['JOB_ID']}).json()
+              up = rel['upload_url'].split('{')[0] + '?name=output.mp4'
+              with open('output.mp4', 'rb') as f:
+                  asset = requests.post(up, headers={**h, 'Content-Type': 'video/mp4'}, data=f.read()).json()
+              return asset.get('browser_download_url', '')
+          if 'preview' in targets or ('ig' in targets and os.environ.get('IG_CREDS_B64')):
+              try:
+                  video_url = upload_release_mp4()
+              except Exception as e:
+                  err += f'REL: {e} | '
+          if 'yt' in targets and os.environ.get('YT_CREDS_B64'):
               try:
                   c = json.loads(base64.b64decode(os.environ['YT_CREDS_B64']).decode())
                   creds = Credentials(None, refresh_token=c['refreshToken'], token_uri='https://oauth2.googleapis.com/token', client_id=c['clientId'], client_secret=c['clientSecret'])
                   yt = build('youtube', 'v3', credentials=creds)
                   resp = yt.videos().insert(part='snippet,status', body={'snippet': {'title': os.environ['YT_TITLE'][:95], 'description': os.environ['CAPTION'], 'categoryId': '22'}, 'status': {'privacyStatus': 'public', 'selfDeclaredMadeForKids': False}}, media_body=MediaFileUpload('output.mp4', mimetype='video/mp4', resumable=True)).execute()
                   yt_url = f"https://youtube.com/shorts/{resp['id']}"
-              except Exception as e: err += f'YT: {e} | '
-          if 'ig' in targets and os.environ['IG_CREDS_B64']:
+              except Exception as e:
+                  err += f'YT: {e} | '
+          if 'ig' in targets and os.environ.get('IG_CREDS_B64') and video_url:
               try:
                   c = json.loads(base64.b64decode(os.environ['IG_CREDS_B64']).decode())
-                  h = {'Authorization': f"Bearer {os.environ['GH_TOKEN']}", 'Accept': 'application/vnd.github+json'}
-                  rel = requests.post(f"https://api.github.com/repos/{os.environ['GH_REPO']}/releases", headers=h, json={'tag_name': os.environ['JOB_ID'], 'name': os.environ['JOB_ID']}).json()
-                  up = rel['upload_url'].split('{')[0] + '?name=output.mp4'
-                  with open('output.mp4', 'rb') as f: asset = requests.post(up, headers={**h, 'Content-Type': 'video/mp4'}, data=f.read()).json()
-                  cr = requests.post(f"https://graph.facebook.com/v21.0/{c['igUserId']}/media", json={'media_type': 'REELS', 'video_url': asset['browser_download_url'], 'caption': os.environ['CAPTION'], 'access_token': c['accessToken']}).json()
+                  cr = requests.post(f"https://graph.facebook.com/v21.0/{c['igUserId']}/media", json={'media_type': 'REELS', 'video_url': video_url, 'caption': os.environ['CAPTION'], 'access_token': c['accessToken']}).json()
                   cid = cr['id']
-                  for _ in range(18):
+                  for _ in range(20):
                       time.sleep(5)
-                      if requests.get(f"https://graph.facebook.com/v21.0/{cid}?fields=status_code&access_token={c['accessToken']}").json().get('status_code') == 'FINISHED': break
+                      st = requests.get(f"https://graph.facebook.com/v21.0/{cid}?fields=status_code&access_token={c['accessToken']}").json().get('status_code')
+                      if st == 'FINISHED': break
+                      if st == 'ERROR': raise RuntimeError('Meta video processing error')
                   pub = requests.post(f"https://graph.facebook.com/v21.0/{c['igUserId']}/media_publish", json={'creation_id': cid, 'access_token': c['accessToken']}).json()
                   ig_url = f"https://instagram.com/reel/{pub.get('id', '')}"
-              except Exception as e: err += f'IG: {e}'
-          requests.post(os.environ['CALLBACK_URL'], headers={'x-callback-secret': os.environ.get('CB_SECRET', '')}, json={'job_id': os.environ['JOB_ID'], 'status': 'done' if (yt_url or ig_url) else 'error', 'yt_url': yt_url, 'ig_url': ig_url, 'error': err})
-          EOF
+              except Exception as e:
+                  err += f'IG: {e}'
+          ok = bool(yt_url or ig_url or ('preview' in targets and video_url))
+          requests.post(os.environ['CALLBACK_URL'], headers={'x-callback-secret': os.environ.get('CB_SECRET', '')}, json={'job_id': os.environ['JOB_ID'], 'status': 'done' if ok else 'error', 'yt_url': yt_url, 'ig_url': ig_url, 'video_url': video_url, 'error': err})
+          PYEOF
