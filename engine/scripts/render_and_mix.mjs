@@ -8,7 +8,7 @@ const rootDir = process.cwd();
 const props = JSON.parse(fs.readFileSync(path.join(rootDir, 'engine/public/props.json'), 'utf-8'));
 const audioPlan = JSON.parse(fs.readFileSync(path.join(rootDir, 'audio_plan.json'), 'utf-8'));
 
-console.log('Bundling Remotion v9 engine...');
+console.log('Bundling Remotion v10 engine...');
 const serveUrl = await bundle({
   entryPoint: path.join(rootDir, 'engine/src/index.jsx'),
   publicDir: path.join(rootDir, 'engine/public'),
@@ -20,7 +20,7 @@ const composition = await selectComposition({
   inputProps: props,
 });
 
-console.log('Rendering frames:', composition.durationInFrames, composition.width + 'x' + composition.height);
+console.log('Rendering frames:', composition.durationInFrames, composition.width + 'x' + composition.height, 'Template:', props.template);
 await renderMedia({
   composition,
   serveUrl,
