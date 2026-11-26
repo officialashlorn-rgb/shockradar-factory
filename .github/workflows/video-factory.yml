@@ -1,4 +1,4 @@
-name: ShockRadar Video Factory v8 (Viral 3D Shorts + 16:9 Long YT + Auto SFX Repo Cache)
+name: ShockRadar Video Factory v9 (Remotion Engine + Gate 2 Vision QC + Auto SFX Cache)
 on:
   workflow_dispatch:
     inputs:
@@ -14,555 +14,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install FFmpeg & Python Packages
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: engine/package.json
+      - name: Install FFmpeg, Python & Remotion Dependencies
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-dejavu-core
           pip install -q edge-tts pillow requests google-auth google-api-python-client
-      - name: Render Dynamic Video (v8 Viral Engine)
+          npm --prefix engine install --no-audit --no-fund
+      - name: Prepare Voice, Word Clock, Gate 2 Vision QC & SFX
         env:
           JOB_ID: ${{ inputs.job_id }}
           PAYLOAD_B64: ${{ inputs.payload_b64 }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-        run: |
-          python3 - << 'PYEOF'
-          import os, io, re, json, glob, math, base64, random, asyncio, urllib.parse, subprocess, textwrap, requests
-          import edge_tts
-          from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
-
-          payload = json.loads(base64.b64decode(os.environ['PAYLOAD_B64']).decode('utf-8'))
-          mode = payload.get('mode', 'story')
-          is_long = (mode == 'long')
-          aspect = '16:9' if is_long else '9:16'
-          W, H = (1920, 1080) if is_long else (1080, 1920)
-          voice = payload.get('voice_name') or 'en-US-AndrewMultilingualNeural'
-          card_url = payload.get('card_png_url', '')
-          pnl_meta = payload.get('pnl_meta') or {}
-          gen_scene_url = payload.get('gen_scene_url', '')
-          cb_token = payload.get('cb_token', '')
-          scenes = payload.get('scenes') or []
-          pexels_key = (os.environ.get('PEXELS_API_KEY') or '').strip()
-          thumb_text = str(payload.get('thumb_text') or payload.get('hook_text') or 'SMART MONEY').upper()
-
-          os.makedirs('assets/sfx', exist_ok=True)
-          os.makedirs('assets/music', exist_ok=True)
-
-          # Build unified narration from per-scene narrations so cuts match exact spoken words
-          scene_word_counts = []
-          narration_parts = []
-          for sc in scenes:
-              n_txt = ' '.join(str(sc.get('narration', '')).replace('\r', ' ').split())
-              if n_txt:
-                  narration_parts.append(n_txt)
-                  scene_word_counts.append(len(n_txt.split()))
-              else:
-                  scene_word_counts.append(0)
-
-          script = ' '.join(narration_parts).strip() or ' '.join(str(payload.get('voice_script', '')).replace('\r', ' ').split())
-          if not script:
-              script = 'Smart money never chases retail breakouts. Watch where liquidity hides.'
-
-          # 1. Studio Voiceover Synthesis + Exact Word Timestamps
-          async def synth_voice_and_words(txt, vname, rate_str):
-              comm = edge_tts.Communicate(txt, vname, rate=rate_str)
-              wlist = []
-              with open('voice_raw.mp3', 'wb') as out_f:
-                  async for chunk in comm.stream():
-                      ctype = chunk.get('type')
-                      if ctype == 'audio':
-                          out_f.write(chunk['data'])
-                      elif ctype == 'WordBoundary':
-                          s = chunk['offset'] / 10_000_000.0
-                          d = chunk['duration'] / 10_000_000.0
-                          w = str(chunk.get('text', '')).strip()
-                          if w:
-                              wlist.append((s, s + max(d, 0.10), w))
-              return wlist
-
-          rate_str = '+2%' if is_long else '+5%'
-          words = []
-          has_voice = False
-          voice_dur = 180.0 if is_long else (20.0 if mode == 'promo' else 28.0)
-          for candidate_v in [voice, 'en-US-AndrewMultilingualNeural', 'en-US-ChristopherNeural']:
-              try:
-                  words = asyncio.run(synth_voice_and_words(script, candidate_v, rate_str))
-                  if os.path.exists('voice_raw.mp3') and os.path.getsize('voice_raw.mp3') > 2000:
-                      # Master voice: remove rumble/jitter, compress evenly, broadcast loudness
-                      subprocess.run(['ffmpeg', '-y', '-i', 'voice_raw.mp3', '-af', 'highpass=f=75,acompressor=threshold=-18dB:ratio=3:attack=5:release=60,loudnorm=I=-14:TP=-1.5:LRA=9', '-ar', '44100', '-ac', '2', 'voice.wav'], check=True)
-                      p = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', 'voice.wav'], capture_output=True, text=True)
-                      voice_dur = float(p.stdout.strip() or voice_dur)
-                      has_voice = True
-                      break
-              except Exception as e:
-                  print('TTS retry warn:', candidate_v, e)
-
-          if not words:
-              raw_w = [w for w in script.split() if w]
-              step = voice_dur / max(1, len(raw_w))
-              words = [(i * step, (i + 1) * step, w) for i, w in enumerate(raw_w)]
-
-          # 2. Smart SFX & Music Auto-Fetcher with GitHub Repo Caching (assets/sfx & assets/music)
-          UA = {'User-Agent': 'ShockRadarMediaBot/8.0 (https://shockradarai.pages.dev)'}
-          SFX_QUERIES = {
-              'whoosh': 'whoosh swoosh transition sound effect',
-              'boom': 'cinematic bass drop boom impact sound effect',
-              'explosion': 'explosion boom sound effect',
-              'cash': 'cash register cha ching coin sound effect',
-              'glitch': 'digital glitch static sound effect',
-              'alert': 'radar ping notification alert sound effect',
-              'heartbeat': 'heartbeat pulse thump sound effect',
-              'riser': 'cinematic riser tension build sound effect',
-              'tick': 'clock ticking stopwatch sound effect',
-              'shatter': 'glass shatter break sound effect',
-              'impact': 'dramatic cinematic hit impact sound effect',
-          }
-
-          def valid_audio(path, min_dur=0.15):
-              if not os.path.exists(path) or os.path.getsize(path) < 2500:
-                  return False
-              p = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', path], capture_output=True, text=True)
-              try:
-                  return float(p.stdout.strip() or 0) >= min_dur
-              except Exception:
-                  return False
-
-          def fetch_web_audio(query, out_mp3, max_sec=2.0):
-              # Source A: Wikimedia Commons CC0/Public Audio API
-              try:
-                  r = requests.get('https://commons.wikimedia.org/w/api.php', params={'action': 'query', 'list': 'search', 'srnamespace': 6, 'srsearch': f'{query} filetype:audio', 'srlimit': 5, 'format': 'json'}, headers=UA, timeout=12)
-                  hits = (r.json().get('query') or {}).get('search') or []
-                  for h in hits[:3]:
-                      info = requests.get('https://commons.wikimedia.org/w/api.php', params={'action': 'query', 'titles': h['title'], 'prop': 'imageinfo', 'iiprop': 'url|size', 'format': 'json'}, headers=UA, timeout=10).json()
-                      pages = (info.get('query') or {}).get('pages') or {}
-                      for pg in pages.values():
-                          ii = (pg.get('imageinfo') or [{}])[0]
-                          u = ii.get('url', '')
-                          if u and int(ii.get('size') or 0) < 6_000_000:
-                              aud = requests.get(u, headers=UA, timeout=18)
-                              if aud.ok and len(aud.content) > 3000:
-                                  with open('tmp_dl_aud', 'wb') as f:
-                                      f.write(aud.content)
-                                  subprocess.run(['ffmpeg', '-y', '-i', 'tmp_dl_aud', '-t', f'{max_sec:.2f}', '-af', 'silenceremove=start_periods=1:start_threshold=-45dB,loudnorm=I=-16:TP=-2', '-ar', '44100', '-ac', '2', '-b:a', '128k', out_mp3], check=True)
-                                  if valid_audio(out_mp3):
-                                      return True
-              except Exception as e:
-                  print('Wikimedia audio warn:', query, e)
-              # Source B: Internet Archive Public Audio API
-              try:
-                  r = requests.get('https://archive.org/advancedsearch.php', params={'q': f'mediatype:audio AND ({query})', 'fl[]': 'identifier', 'rows': 4, 'output': 'json'}, headers=UA, timeout=12)
-                  docs = ((r.json().get('response') or {}).get('docs') or [])
-                  for d in docs[:3]:
-                      ident = d.get('identifier')
-                      if not ident:
-                          continue
-                      meta = requests.get(f'https://archive.org/metadata/{ident}/files', headers=UA, timeout=10).json()
-                      for fl in (meta.get('result') or []):
-                          nm = str(fl.get('name', ''))
-                          sz = int(fl.get('size') or 0)
-                          if nm.lower().endswith(('.mp3', '.ogg', '.wav')) and 4000 < sz < 5_000_000:
-                              u = f'https://archive.org/download/{ident}/{urllib.parse.quote(nm)}'
-                              aud = requests.get(u, headers=UA, timeout=20)
-                              if aud.ok and len(aud.content) > 3000:
-                                  with open('tmp_dl_aud', 'wb') as f:
-                                      f.write(aud.content)
-                                  subprocess.run(['ffmpeg', '-y', '-i', 'tmp_dl_aud', '-t', f'{max_sec:.2f}', '-af', 'silenceremove=start_periods=1:start_threshold=-45dB,loudnorm=I=-16:TP=-2', '-ar', '44100', '-ac', '2', '-b:a', '128k', out_mp3], check=True)
-                                  if valid_audio(out_mp3):
-                                      return True
-              except Exception as e:
-                  print('Archive audio warn:', query, e)
-              return False
-
-          def synth_clean_sfx(cue, out_mp3):
-              # Studio-shaped synthesized fallback (never raw buzzing noise)
-              if cue in ('boom', 'explosion', 'impact'):
-                  expr = '0.75*sin(2*PI*(95*exp(-5*t)+32)*t)*exp(-3.2*t)+0.22*(random(0)-0.5)*exp(-5.5*t)'
-                  subprocess.run(['ffmpeg', '-y', '-f', 'lavfi', '-i', f'aevalsrc={expr}:s=44100:d=0.95', '-af', 'lowpass=f=320,afade=t=out:st=0.55:d=0.40', '-b:a', '128k', out_mp3], check=True)
-              elif cue in ('cash', 'alert'):
-                  expr = '0.45*sin(2*PI*1320*t)*exp(-6*t)+0.35*sin(2*PI*1980*t)*exp(-7*t)'
-                  subprocess.run(['ffmpeg', '-y', '-f', 'lavfi', '-i', f'aevalsrc={expr}:s=44100:d=0.60', '-af', 'afade=t=out:st=0.35:d=0.25', '-b:a', '128k', out_mp3], check=True)
-              elif cue in ('heartbeat', 'tick'):
-                  expr = '0.65*sin(2*PI*62*t)*exp(-14*t)'
-                  subprocess.run(['ffmpeg', '-y', '-f', 'lavfi', '-i', f'aevalsrc={expr}:s=44100:d=0.32', '-af', 'lowpass=f=220', '-b:a', '128k', out_mp3], check=True)
-              else:
-                  subprocess.run(['ffmpeg', '-y', '-f', 'lavfi', '-t', '0.36', '-i', 'anoisesrc=c=pink:r=44100:a=0.35', '-af', 'bandpass=f=650:w=500,afade=t=in:st=0:d=0.14,afade=t=out:st=0.16:d=0.20', '-b:a', '128k', out_mp3], check=True)
-
-          sfx_cache_used = []
-          def get_or_fetch_sfx(raw_cue):
-              cue = re.sub(r'[^a-z]', '', str(raw_cue or 'whoosh').lower())
-              if cue not in SFX_QUERIES:
-                  cue = 'whoosh'
-              cached = f'assets/sfx/{cue}.mp3'
-              if valid_audio(cached):
-                  return cached
-              ok = fetch_web_audio(SFX_QUERIES[cue], cached, max_sec=1.6)
-              if ok:
-                  sfx_cache_used.append(f'DL:{cue}')
-                  return cached
-              synth_clean_sfx(cue, cached)
-              sfx_cache_used.append(f'SYN:{cue}')
-              return cached
-
-          # Background music (checks music/, assets/music/, then auto-fetches & caches CC0 ambient track)
-          music_files = glob.glob('music/*.mp3') + glob.glob('music/**/*.mp3', recursive=True) + glob.glob('assets/music/*.mp3')
-          music_files = [m for m in music_files if valid_audio(m, 8.0)]
-          music = random.choice(music_files) if music_files else ''
-          if not music:
-              dl_bg = 'assets/music/dark_ambient_01.mp3'
-              if fetch_web_audio('dark ambient cinematic instrumental suspense loop', dl_bg, max_sec=65.0):
-                  music = dl_bg
-              else:
-                  subprocess.run(['ffmpeg', '-y', '-f', 'lavfi', '-i', 'aevalsrc=0.045*sin(2*PI*65.4*t)+0.03*sin(2*PI*98.0*t)*(0.6+0.4*sin(2*PI*0.18*t))+0.02*sin(2*PI*130.8*t):s=44100:d=30', '-af', 'lowpass=f=240', 'synth_bed.wav'], check=True)
-                  music = 'synth_bed.wav'
-
-          # 3. Calculate Exact Scene Timestamps Aligned to Spoken Narration Words
-          need_end_card = (mode == 'promo')
-          end_card_dur = 4.0 if need_end_card else 0.0
-          total_dur = max(12.0, voice_dur + (1.2 if need_end_card else 0.55))
-
-          n_sc = len(scenes)
-          scene_spans = []
-          if n_sc >= 2:
-              tot_wc = sum(scene_word_counts)
-              if tot_wc > 0 and len(words) >= n_sc:
-                  cur_idx = 0
-                  for i, wc in enumerate(scene_word_counts):
-                      st_t = words[cur_idx][0] if i > 0 else 0.0
-                      share = max(1, int(round(len(words) * (wc / tot_wc))))
-                      nxt_idx = min(len(words) - 1, cur_idx + share)
-                      en_t = words[nxt_idx][0] if i < n_sc - 1 else max(voice_dur, st_t + 1.6)
-                      if en_t - st_t < 1.35:
-                          en_t = st_t + 1.35
-                      scene_spans.append((st_t, en_t))
-                      cur_idx = nxt_idx
-              else:
-                  story_span = max(8.0, total_dur - end_card_dur)
-                  each = story_span / n_sc
-                  scene_spans = [(i * each, (i + 1) * each) for i in range(n_sc)]
-
-          # 4. Build Clean ASS Subtitles (ZERO top Hook box, ZERO bottom CTA bar! Safe-Zone Dynamic Subtitles Only)
-          def fmt_ass_t(sec):
-              sec = max(0.0, float(sec))
-              h = int(sec // 3600)
-              m = int((sec % 3600) // 60)
-              s = int(sec % 60)
-              cs = int(round((sec - int(sec)) * 100))
-              if cs >= 100:
-                  s += 1
-                  cs = 0
-              return f'{h}:{m:02d}:{s:02d}.{cs:02d}'
-
-          def fmt_srt_t(sec):
-              sec = max(0.0, float(sec))
-              h = int(sec // 3600)
-              m = int((sec % 3600) // 60)
-              s = int(sec % 60)
-              ms = int(round((sec - int(sec)) * 1000))
-              if ms >= 1000:
-                  s += 1
-                  ms = 0
-              return f'{h:02d}:{m:02d}:{s:02d},{ms:03d}'
-
-          def esc_ass(s):
-              return ''.join(ch for ch in str(s) if ch.isprintable()).replace('\\', '').replace('{', '(').replace('}', ')').strip()
-
-          groups = []
-          cur = []
-          max_w_grp = 6 if is_long else 2
-          max_ch_grp = 36 if is_long else 14
-          for item in words:
-              cur.append(item)
-              txt_len = sum(len(x[2]) for x in cur) + len(cur)
-              if len(cur) >= max_w_grp or txt_len >= max_ch_grp or item[2].endswith(('.', '!', '?', ',')):
-                  groups.append((cur[0][0], cur[-1][1], ' '.join(x[2] for x in cur)))
-                  cur = []
-          if cur:
-              groups.append((cur[0][0], cur[-1][1], ' '.join(x[2] for x in cur)))
-
-          # Write .srt for YouTube Search Indexing
-          with open('captions.srt', 'w', encoding='utf-8') as sf:
-              for gi, (st, en, gtxt) in enumerate(groups, 1):
-                  sf.write(f'{gi}\n{fmt_srt_t(st)} --> {fmt_srt_t(max(st + 0.2, en))}\n{gtxt}\n\n')
-
-          # Clean ASS: Viral Safe-Zone Subtitles ONLY (MarginV=520 on 9:16, MarginV=70 on 16:9)
-          sub_style = (
-              'Style: Viral,DejaVu Sans,54,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,120,120,70,1'
-              if is_long else
-              'Style: Viral,DejaVu Sans,84,&H00FFFFFF,&H0000FFFF,&H00000000,&H95000000,-1,0,0,0,100,100,1,0,1,9,4,2,65,65,520,1'
-          )
-          ass_lines = [
-              '[Script Info]', 'ScriptType: v4.00+', f'PlayResX: {W}', f'PlayResY: {H}', 'WrapStyle: 2', '',
-              '[V4+ Styles]',
-              'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-              sub_style, '', '[Events]',
-              'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
-          ]
-          for idx_g, (st, en, gtxt) in enumerate(groups):
-              en_adj = groups[idx_g + 1][0] if idx_g + 1 < len(groups) else max(en + 0.25, voice_dur)
-              en_adj = max(st + 0.14, min(en_adj, total_dur))
-              clean_g = esc_ass(gtxt if is_long else gtxt.upper())
-              if not clean_g:
-                  continue
-              if is_long:
-                  styled = clean_g
-              else:
-                  pop = '{\\fscx114\\fscy114\\t(0,75,\\fscx100\\fscy100)}'
-                  if idx_g % 4 == 1:
-                      styled = pop + '{\\c&H0038E1FF&}' + clean_g
-                  elif idx_g % 4 == 3:
-                      styled = pop + '{\\c&H0099D334&}' + clean_g
-                  else:
-                      styled = pop + clean_g
-              ass_lines.append(f'Dialogue: 2,{fmt_ass_t(st)},{fmt_ass_t(en_adj)},Viral,,0,0,0,,{styled}')
-          with open('subs.ass', 'w', encoding='utf-8') as f:
-              f.write('\n'.join(ass_lines) + '\n')
-
-          # 5. Visual Pipeline (CF Workers AI Flux -> SDXL -> Gemini -> Pexels HD Video) + Guaranteed Local PnL Card
-          def fit_frame(img_bytes, out_path):
-              im = Image.open(io.BytesIO(img_bytes)).convert('RGB')
-              if im.width < 200 or im.height < 200:
-                  raise ValueError('Image too small')
-              fitted = ImageOps.fit(im, (W, H), method=Image.Resampling.LANCZOS)
-              overlay = Image.new('RGBA', (W, H), (0, 0, 0, 0))
-              dr = ImageDraw.Draw(overlay)
-              b_start = int(H * 0.72)
-              for y in range(b_start, H):
-                  alpha = int(175 * ((y - b_start) / max(1, H - b_start)))
-                  dr.line([(0, y), (W, y)], fill=(4, 6, 12, alpha))
-              final = Image.alpha_composite(fitted.convert('RGBA'), overlay).convert('RGB')
-              final.save(out_path, 'JPEG', quality=93)
-
-          def build_local_pnl_card(meta, out_path):
-              img = Image.new('RGB', (1080, 1920), (6, 9, 18))
-              dr = ImageDraw.Draw(img)
-              side = str(meta.get('side', 'SHORT')).upper()
-              accent = (251, 113, 133) if side == 'SHORT' else (16, 185, 129)
-              dr.rounded_rectangle([64, 420, 1016, 1440], radius=44, fill=(13, 20, 36), outline=accent, width=4)
-              f_lg = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 132)
-              f_md = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 62)
-              f_sm = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 34)
-              f_xs = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 28)
-              dr.text((120, 480), 'SHOCKRADAR QUANT', font=f_sm, fill=(226, 232, 240))
-              dr.text((120, 575), f"{meta.get('symbol', 'HYPE')}/USDT", font=f_md, fill=(255, 255, 255))
-              dr.text((120, 665), f"{side}  |  {meta.get('leverage', '10x')}  |  {meta.get('stageLabel', 'TP2 HIT')}", font=f_sm, fill=accent)
-              dr.text((115, 780), f"+{meta.get('displayPnl', '31.5')}%", font=f_lg, fill=accent)
-              dr.text((120, 965), str(meta.get('setupName', '15m Quant Setup')), font=f_xs, fill=(148, 163, 184))
-              dr.rounded_rectangle([120, 1050, 520, 1220], radius=24, fill=(9, 14, 26), outline=(30, 41, 59), width=2)
-              dr.text((150, 1082), 'ENTRY PRICE', font=f_xs, fill=(148, 163, 184))
-              dr.text((150, 1135), f"${meta.get('entry', '24.10')}", font=f_sm, fill=(255, 255, 255))
-              dr.rounded_rectangle([555, 1050, 960, 1220], radius=24, fill=(9, 14, 26), outline=(30, 41, 59), width=2)
-              dr.text((585, 1082), 'TARGET / PEAK', font=f_xs, fill=(148, 163, 184))
-              dr.text((585, 1135), f"${meta.get('exit', '23.34')}", font=f_sm, fill=accent)
-              dr.text((120, 1320), '24H FREE TRIAL  •  LINK IN BIO', font=f_sm, fill=(203, 213, 225))
-              img.save(out_path, 'PNG')
-
-          def build_yt_thumbnail(bg_jpg, headline, out_jpg):
-              base = Image.open(bg_jpg).convert('RGB')
-              base = ImageOps.fit(base, (1280, 720), method=Image.Resampling.LANCZOS)
-              grad = Image.new('RGBA', (1280, 720), (0, 0, 0, 0))
-              gd = ImageDraw.Draw(grad)
-              for x in range(0, 920):
-                  a = int(225 * (1 - x / 920))
-                  gd.line([(x, 0), (x, 720)], fill=(5, 8, 16, a))
-              comp = Image.alpha_composite(base.convert('RGBA'), grad).convert('RGB')
-              dr = ImageDraw.Draw(comp)
-              f_big = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 102)
-              f_tag = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 34)
-              dr.rounded_rectangle([62, 66, 445, 130], radius=16, fill=(16, 185, 129))
-              dr.text((88, 80), 'QUANT MASTERCLASS', font=f_tag, fill=(6, 12, 20))
-              lines = textwrap.wrap(headline.upper(), width=11)[:3]
-              y = 185
-              for li, ln in enumerate(lines):
-                  col = (255, 225, 56) if li == 1 else (255, 255, 255)
-                  for ox, oy in [(-4, -4), (4, -4), (-4, 4), (4, 4), (0, 6)]:
-                      dr.text((64 + ox, y + oy), ln, font=f_big, fill=(0, 0, 0))
-                  dr.text((64, y), ln, font=f_big, fill=col)
-                  y += 126
-              comp.save(out_jpg, 'JPEG', quality=94)
-
-          source_stats = {}
-          def bump_src(k):
-              source_stats[k] = source_stats.get(k, 0) + 1
-
-          def build_scene_clip(scene, idx, clip_dur, out_clip):
-              prompt = str(scene.get('prompt', '')).strip()
-              kw = str(scene.get('keyword', 'wall street finance')).strip()
-              img_ready = False
-              if gen_scene_url and prompt:
-                  try:
-                      r = requests.post(gen_scene_url, headers={'x-cb-token': cb_token}, json={'prompt': prompt, 'job_id': os.environ['JOB_ID'], 'aspect': aspect}, timeout=60)
-                      ct = r.headers.get('content-type', '')
-                      if r.ok and ct.startswith('image/') and len(r.content) > 10000:
-                          fit_frame(r.content, f'scene_{idx}.jpg')
-                          bump_src(r.headers.get('x-img-source', 'AI-IMG'))
-                          img_ready = True
-                      else:
-                          print(f'Scene {idx} gen HTTP {r.status_code}: {r.text[:140]}')
-                  except Exception as e:
-                      print(f'Scene {idx} gen err:', e)
-
-              if not img_ready and pexels_key:
-                  try:
-                      ori = 'landscape' if is_long else 'portrait'
-                      vr = requests.get('https://api.pexels.com/videos/search', params={'query': kw, 'orientation': ori, 'per_page': 5}, headers={'Authorization': pexels_key}, timeout=15)
-                      vids = vr.json().get('videos') or []
-                      if vids:
-                          vfiles = [vf for vf in (random.choice(vids).get('video_files') or []) if vf.get('file_type') == 'video/mp4' and vf.get('link')]
-                          vfiles.sort(key=lambda x: abs((x.get('width') or 720) - W))
-                          if vfiles:
-                              mp = requests.get(vfiles[0]['link'], timeout=35)
-                              if mp.ok and len(mp.content) > 40000:
-                                  raw_v = f'stock_{idx}.mp4'
-                                  with open(raw_v, 'wb') as f:
-                                      f.write(mp.content)
-                                  subprocess.run(['ffmpeg', '-y', '-stream_loop', '-1', '-i', raw_v, '-vf', f'scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},eq=contrast=1.06:saturation=1.10,fps=25,format=yuv420p', '-t', f'{clip_dur:.2f}', '-an', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '22', out_clip], check=True)
-                                  bump_src('PEXELS-VID')
-                                  return True
-                  except Exception as e:
-                      print(f'Scene {idx} Pexels err:', e)
-
-              if not img_ready:
-                  return False
-
-              # Punchy dynamic camera motion (fast push-in, diagonal drift, zoom-out, pan)
-              frames = max(32, int(math.ceil(clip_dur * 25)))
-              mtype = idx % 4
-              if mtype == 0:
-                  zp = f"zoompan=z='min(1.0+0.20*on/{frames},1.20)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={W}x{H}:fps=25"
-              elif mtype == 1:
-                  zp = f"zoompan=z='1.18':d={frames}:x='(iw-iw/zoom)*on/{frames}':y='(ih-ih/zoom)*0.35':s={W}x{H}:fps=25"
-              elif mtype == 2:
-                  zp = f"zoompan=z='max(1.20-0.20*on/{frames},1.0)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={W}x{H}:fps=25"
-              else:
-                  zp = f"zoompan=z='1.18':d={frames}:x='(iw-iw/zoom)*(1-on/{frames})':y='(ih-ih/zoom)*0.65':s={W}x{H}:fps=25"
-              subprocess.run(['ffmpeg', '-y', '-loop', '1', '-i', f'scene_{idx}.jpg', '-vf', f'scale={W}:{H},{zp},eq=contrast=1.06:saturation=1.10,format=yuv420p', '-t', f'{clip_dur:.2f}', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '21', out_clip], check=True)
-              return True
-
-          # Ensure PnL Proof Card exists (remote PNG or guaranteed local Pillow render)
-          if need_end_card:
-              card_ok = False
-              if card_url:
-                  try:
-                      cr = requests.get(card_url, timeout=25)
-                      if cr.ok and len(cr.content) > 6000:
-                          with open('card.png', 'wb') as cf:
-                              cf.write(cr.content)
-                          card_ok = True
-                  except Exception as e:
-                      print('Card fetch warn:', e)
-              if not card_ok:
-                  build_local_pnl_card(pnl_meta, 'card.png')
-
-          # Render all scenes with synced durations + SFX map
-          xfade_d = 0.22 if is_long else 0.16
-          clip_paths = []
-          clip_durs = []
-          sfx_events = []
-          chapter_marks = []
-          running_t = 0.0
-          first_jpg = None
-
-          for idx, sc in enumerate(scenes):
-              st_s, en_s = scene_spans[idx] if idx < len(scene_spans) else (idx * 3.0, (idx + 1) * 3.0)
-              c_dur = max(1.5, (en_s - st_s) + xfade_d)
-              cp = f'clip_{idx}.mp4'
-              if build_scene_clip(sc, idx, c_dur, cp):
-                  if first_jpg is None and os.path.exists(f'scene_{idx}.jpg'):
-                      first_jpg = f'scene_{idx}.jpg'
-                  ch_name = str(sc.get('chapter', '')).strip()
-                  if is_long and ch_name and (not chapter_marks or chapter_marks[-1][1] != ch_name):
-                      chapter_marks.append((max(0, int(round(running_t))), ch_name))
-                  cue = sc.get('sfx') or ('whoosh' if idx > 0 else 'boom')
-                  sfx_path = get_or_fetch_sfx(cue)
-                  sfx_events.append((max(0.0, running_t), sfx_path))
-                  clip_paths.append(cp)
-                  clip_durs.append(c_dur)
-                  running_t += (c_dur - xfade_d)
-
-          if len(clip_paths) < 2:
-              raise RuntimeError('VISUAL_GEN_FAILED: Fewer than 2 3D scenes generated! Ensure Cloudflare Workers AI (AI) binding is attached.')
-
-          if need_end_card and os.path.exists('card.png'):
-              end_clip_dur = end_card_dur + xfade_d
-              end_frames = max(35, int(math.ceil(end_clip_dur * 25)))
-              subprocess.run(['ffmpeg', '-y', '-loop', '1', '-i', 'card.png', '-vf', f"scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=#05070c,zoompan=z='min(1.0+0.10*on/{end_frames},1.10)':d={end_frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={W}x{H}:fps=25,format=yuv420p", '-t', f'{end_clip_dur:.2f}', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '21', 'clip_end.mp4'], check=True)
-              sfx_events.append((max(0.0, running_t), get_or_fetch_sfx('cash')))
-              clip_paths.append('clip_end.mp4')
-              clip_durs.append(end_clip_dur)
-              running_t += (end_clip_dur - xfade_d)
-
-          final_dur = max(voice_dur + 0.4, running_t + xfade_d)
-          if is_long and first_jpg:
-              build_yt_thumbnail(first_jpg, thumb_text, 'thumbnail.jpg')
-
-          # Chain punchy xfade transitions + clean safe-zone subtitles
-          transitions = ['slideright', 'wipeleft', 'smoothup', 'slideleft', 'circleopen', 'fadeblack']
-          ff_in = []
-          for cp in clip_paths:
-              ff_in += ['-i', cp]
-          fparts = []
-          prev_tag = '[0:v]'
-          offset = clip_durs[0] - xfade_d
-          for j in range(1, len(clip_paths)):
-              out_tag = f'[xf{j}]'
-              tr = transitions[(j - 1) % len(transitions)]
-              off_val = max(0.25, offset)
-              fparts.append(f'{prev_tag}[{j}:v]xfade=transition={tr}:duration={xfade_d:.2f}:offset={off_val:.2f}{out_tag}')
-              prev_tag = out_tag
-              offset += clip_durs[j] - xfade_d
-          fparts.append(f'{prev_tag}ass=subs.ass[vout]')
-          subprocess.run(['ffmpeg', '-y', *ff_in, '-filter_complex', ';'.join(fparts), '-map', '[vout]', '-c:v', 'libx264', '-preset', 'fast', '-crf', '22', '-pix_fmt', 'yuv420p', 'raw_video.mp4'], check=True)
-
-          # Mix Studio Voice + Ducked Music + Cached Web SFX
-          fade_out = max(1.0, final_dur - 1.5)
-          cmd = ['ffmpeg', '-y', '-i', 'raw_video.mp4']
-          f_chains = []
-          mix_inputs = []
-          in_idx = 1
-          if has_voice:
-              cmd += ['-i', 'voice.wav']
-              f_chains.append(f'[{in_idx}:a]volume=1.18,apad[v_aud]')
-              mix_inputs.append('[v_aud]')
-              in_idx += 1
-          cmd += ['-stream_loop', '-1', '-i', music]
-          m_vol = 0.09 if is_long else (0.12 if has_voice else 0.42)
-          f_chains.append(f'[{in_idx}:a]volume={m_vol},afade=t=in:st=0:d=0.6,afade=t=out:st={fade_out:.2f}:d=1.5[m_aud]')
-          mix_inputs.append('[m_aud]')
-          in_idx += 1
-          for s_i, (st_sec, s_path) in enumerate(sfx_events[:14]):
-              cmd += ['-i', s_path]
-              ms = max(0, int(st_sec * 1000))
-              f_chains.append(f'[{in_idx}:a]volume=0.32,adelay={ms}|{ms}[sfx{s_i}]')
-              mix_inputs.append(f'[sfx{s_i}]')
-              in_idx += 1
-          f_chains.append(f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:duration=longest:normalize=0,alimiter=limit=0.95[aout]")
-          cmd += ['-filter_complex', ';'.join(f_chains), '-map', '0:v', '-map', '[aout]', '-t', f'{final_dur:.2f}', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', 'output.mp4']
-          subprocess.run(cmd, check=True)
-
-          # Format exact YouTube Chapters for Long-Form SEO
-          chap_txt = ''
-          if is_long and chapter_marks:
-              lines_ch = ['00:00 Introduction']
-              for sec_c, cname in chapter_marks:
-                  if sec_c >= 5:
-                      lines_ch.append(f'{sec_c // 60:02d}:{sec_c % 60:02d} {cname}')
-              chap_txt = '\n'.join(lines_ch)
-
-          with open('render_meta.json', 'w', encoding='utf-8') as mf:
-              json.dump({'sources': source_stats, 'sfx': sfx_cache_used, 'chapters': chap_txt, 'has_thumb': os.path.exists('thumbnail.jpg')}, mf)
-          print('Render complete! Sources:', source_stats, 'SFX:', sfx_cache_used)
-          PYEOF
+        run: python3 engine/scripts/prepare_assets.py
+      - name: Render Code-Driven Remotion Video & Mix Audio
+        run: node engine/scripts/render_and_mix.mjs
       - name: Cache Downloaded SFX & Music to Repo
         if: success()
         continue-on-error: true
         run: |
-          git config user.name "ShockRadar Factory Bot"
-          git config user.email "bot@shockradar.ai"
+          git config user.name 'ShockRadar Factory Bot'
+          git config user.email 'bot@shockradar.ai'
           git add assets/sfx assets/music 2>/dev/null || true
           if ! git diff --cached --quiet; then
-            git commit -m "chore: cache auto-downloaded SFX & music assets"
+            git commit -m 'chore: cache auto-downloaded SFX & music'
             git pull --rebase origin main || true
             git push origin HEAD:main || true
           fi
-      - name: Publish, SEO, Thumbnail, Captions & Callback
+      - name: Upload Release, Publish & Callback
         if: always()
         env:
           JOB_ID: ${{ inputs.job_id }}
@@ -580,60 +61,48 @@ jobs:
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
           payload = json.loads(base64.b64decode(os.environ['PAYLOAD_B64']).decode('utf-8'))
+          bp = payload.get('blueprint') or {}
+          plats = bp.get('platforms') or {}
+          yt_meta = plats.get('youtube') or {}
+          ig_meta = plats.get('instagram') or {}
           mode = payload.get('mode', 'story')
           is_long = (mode == 'long')
           targets = [t.strip().lower() for t in os.environ['TARGETS'].split(',') if t.strip()]
-          caption = payload.get('caption', '')
-          yt_title = payload.get('yt_title', 'ShockRadar AI #shorts')
-          yt_tags = payload.get('yt_tags') or ['crypto', 'trading', 'finance', 'quant', 'investing']
-          pinned_comment = payload.get('pinned_comment', '')
-          watch_next = payload.get('watch_next', '')
           callback_url = payload.get('callback_url', '')
           cb_token = payload.get('cb_token', '')
           yt_url, ig_url, video_url, asset_api_url, err = '', '', '', '', ''
-          rmeta = {}
-          if os.path.exists('render_meta.json'):
-              try:
-                  rmeta = json.load(open('render_meta.json'))
-              except Exception:
-                  pass
-          sources = rmeta.get('sources', {})
-          chapters = rmeta.get('chapters', '')
-          full_yt_desc = caption
-          if chapters:
-              full_yt_desc += '\n\nTIMESTAMPS:\n' + chapters
+          rmeta = json.load(open('render_meta.json')) if os.path.exists('render_meta.json') else {}
+          watch_next = payload.get('watch_next', '')
+          full_yt_desc = str(yt_meta.get('description') or ig_meta.get('caption') or '')
           if watch_next:
               full_yt_desc += '\n\nWATCH NEXT:\n' + watch_next
 
           if not os.path.exists('output.mp4'):
-              err = 'Video render failed! Ensure Cloudflare Workers AI (AI) binding is attached to your Worker.'
+              err = 'Remotion v9 render failed! Check GitHub Actions logs.'
           else:
-              def upload_release_mp4():
+              try:
                   h = {'Authorization': f"Bearer {os.environ['GH_TOKEN']}", 'Accept': 'application/vnd.github+json'}
                   rel = requests.post(f"https://api.github.com/repos/{os.environ['GH_REPO']}/releases", headers=h, json={'tag_name': os.environ['JOB_ID'], 'name': os.environ['JOB_ID']}).json()
                   up = rel['upload_url'].split('{')[0] + '?name=output.mp4'
                   with open('output.mp4', 'rb') as f:
                       asset = requests.post(up, headers={**h, 'Content-Type': 'video/mp4'}, data=f.read()).json()
-                  return asset.get('browser_download_url', ''), asset.get('url', '')
-              if 'preview' in targets or ('ig' in targets and os.environ.get('IG_CREDS_B64')):
-                  try:
-                      video_url, asset_api_url = upload_release_mp4()
-                  except Exception as e:
-                      err += f'REL: {e} | '
+                  video_url = asset.get('browser_download_url', '')
+                  asset_api_url = asset.get('url', '')
+              except Exception as e:
+                  err += f'REL: {e} | '
               if 'yt' in targets and os.environ.get('YT_CREDS_B64'):
                   try:
                       c = json.loads(base64.b64decode(os.environ['YT_CREDS_B64']).decode())
                       creds = Credentials(None, refresh_token=c['refreshToken'], token_uri='https://oauth2.googleapis.com/token', client_id=c['clientId'], client_secret=c['clientSecret'])
                       yt = build('youtube', 'v3', credentials=creds)
-                      cat_id = '27' if mode in ('edu', 'long') else '22'
                       resp = yt.videos().insert(
                           part='snippet,status',
                           body={
                               'snippet': {
-                                  'title': yt_title[:98],
+                                  'title': str(yt_meta.get('title') or 'ShockRadar Quant #shorts')[:98],
                                   'description': full_yt_desc[:4900],
-                                  'tags': [str(t)[:30] for t in yt_tags[:15]],
-                                  'categoryId': cat_id,
+                                  'tags': [str(t)[:30] for t in (yt_meta.get('tags') or ['crypto','trading','shorts'])[:15]],
+                                  'categoryId': '27' if mode in ('edu', 'long') else '22',
                                   'defaultLanguage': 'en',
                                   'defaultAudioLanguage': 'en',
                               },
@@ -644,26 +113,20 @@ jobs:
                       vid_id = resp['id']
                       yt_url = f'https://youtu.be/{vid_id}' if is_long else f'https://youtube.com/shorts/{vid_id}'
                       if is_long and os.path.exists('thumbnail.jpg'):
-                          try:
-                              yt.thumbnails().set(videoId=vid_id, media_body=MediaFileUpload('thumbnail.jpg', mimetype='image/jpeg')).execute()
-                          except Exception as te:
-                              print('Thumb warn:', te)
+                          try: yt.thumbnails().set(videoId=vid_id, media_body=MediaFileUpload('thumbnail.jpg', mimetype='image/jpeg')).execute()
+                          except Exception: pass
                       if os.path.exists('captions.srt'):
-                          try:
-                              yt.captions().insert(part='snippet', body={'snippet': {'videoId': vid_id, 'language': 'en', 'name': 'English', 'isDraft': False}}, media_body=MediaFileUpload('captions.srt', mimetype='application/octet-stream')).execute()
-                          except Exception as ce:
-                              print('Caption warn:', ce)
-                      if pinned_comment:
-                          try:
-                              yt.commentThreads().insert(part='snippet', body={'snippet': {'videoId': vid_id, 'topLevelComment': {'snippet': {'textOriginal': pinned_comment}}}}).execute()
-                          except Exception as cme:
-                              print('Comment warn:', cme)
+                          try: yt.captions().insert(part='snippet', body={'snippet': {'videoId': vid_id, 'language': 'en', 'name': 'English', 'isDraft': False}}, media_body=MediaFileUpload('captions.srt', mimetype='application/octet-stream')).execute()
+                          except Exception: pass
+                      if yt_meta.get('pinned_comment'):
+                          try: yt.commentThreads().insert(part='snippet', body={'snippet': {'videoId': vid_id, 'topLevelComment': {'snippet': {'textOriginal': yt_meta['pinned_comment']}}}}).execute()
+                          except Exception: pass
                   except Exception as e:
                       err += f'YT: {e} | '
               if 'ig' in targets and not is_long and os.environ.get('IG_CREDS_B64') and video_url:
                   try:
                       c = json.loads(base64.b64decode(os.environ['IG_CREDS_B64']).decode())
-                      cr = requests.post(f"https://graph.facebook.com/v21.0/{c['igUserId']}/media", json={'media_type': 'REELS', 'video_url': video_url, 'caption': caption, 'access_token': c['accessToken']}).json()
+                      cr = requests.post(f"https://graph.facebook.com/v21.0/{c['igUserId']}/media", json={'media_type': 'REELS', 'video_url': video_url, 'caption': ig_meta.get('caption', ''), 'access_token': c['accessToken']}).json()
                       cid = cr['id']
                       for _ in range(24):
                           time.sleep(5)
@@ -675,8 +138,20 @@ jobs:
                   except Exception as e:
                       err += f'IG: {e}'
           ok = bool(yt_url or ig_url or ('preview' in targets and (video_url or asset_api_url)))
-          cb_headers = {'x-callback-secret': os.environ.get('CB_SECRET', ''), 'x-cb-token': cb_token}
-          cb_body = {'job_id': os.environ['JOB_ID'], 'mode': mode, 'style_name': payload.get('style_name', ''), 'sources': sources, 'sfx': rmeta.get('sfx', []), 'cb_token': cb_token, 'status': 'done' if ok else 'error', 'yt_url': yt_url, 'ig_url': ig_url, 'video_url': video_url, 'asset_api_url': asset_api_url, 'error': err}
-          res = requests.post(callback_url, headers=cb_headers, json=cb_body, timeout=30)
-          print('Callback HTTP:', res.status_code, res.text[:200])
+          cb_body = {
+              'job_id': os.environ['JOB_ID'],
+              'mode': mode,
+              'sources': rmeta.get('sources', {}),
+              'sfx': rmeta.get('sfx', []),
+              'gate2_score': rmeta.get('gate2_score', 0),
+              'gate2_retries': rmeta.get('gate2_retries', 0),
+              'cb_token': cb_token,
+              'status': 'done' if ok else 'error',
+              'yt_url': yt_url,
+              'ig_url': ig_url,
+              'video_url': video_url,
+              'asset_api_url': asset_api_url,
+              'error': err,
+          }
+          requests.post(callback_url, headers={'x-callback-secret': os.environ.get('CB_SECRET', ''), 'x-cb-token': cb_token}, json=cb_body, timeout=30)
           PYEOF
