@@ -1,4 +1,4 @@
-name: ShockRadar Video Factory v9 (Remotion Engine + Gate 2 Vision QC + Auto SFX Cache)
+name: ShockRadar Video Factory v10 (4-Template Remotion + Gate 2 + Chromium Deps)
 on:
   workflow_dispatch:
     inputs:
@@ -19,17 +19,21 @@ jobs:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: engine/package.json
-      - name: Install FFmpeg, Python & Remotion Dependencies
+      - name: Install FFmpeg, Chromium Deps, Python & Remotion
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-dejavu-core
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2
+          sudo apt-get install -y -qq libasound2t64 || sudo apt-get install -y -qq libasound2 || true
           pip install -q edge-tts pillow requests google-auth google-api-python-client
           npm --prefix engine install --no-audit --no-fund
-      - name: Prepare Voice, Word Clock, Gate 2 Vision QC & SFX
+          npx --prefix engine remotion browser ensure
+      - name: Prepare Dual-Voice TTS, Word Clock, Gate 2 Vision QC & SFX
         env:
           JOB_ID: ${{ inputs.job_id }}
           PAYLOAD_B64: ${{ inputs.payload_b64 }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         run: python3 engine/scripts/prepare_assets.py
-      - name: Render Code-Driven Remotion Video & Mix Audio
+      - name: Render Remotion Video & Mix Audio
         run: node engine/scripts/render_and_mix.mjs
       - name: Cache Downloaded SFX & Music to Repo
         if: success()
@@ -43,7 +47,7 @@ jobs:
             git pull --rebase origin main || true
             git push origin HEAD:main || true
           fi
-      - name: Upload Release, Publish & Callback
+      - name: Upload Release Assets (MP4 + Thumb + SRT), Publish & Callback
         if: always()
         env:
           JOB_ID: ${{ inputs.job_id }}
@@ -70,7 +74,7 @@ jobs:
           targets = [t.strip().lower() for t in os.environ['TARGETS'].split(',') if t.strip()]
           callback_url = payload.get('callback_url', '')
           cb_token = payload.get('cb_token', '')
-          yt_url, ig_url, video_url, asset_api_url, err = '', '', '', '', ''
+          yt_url, ig_url, video_url, asset_api_url, thumb_api_url, srt_api_url, err = '', '', '', '', '', '', ''
           rmeta = json.load(open('render_meta.json')) if os.path.exists('render_meta.json') else {}
           watch_next = payload.get('watch_next', '')
           full_yt_desc = str(yt_meta.get('description') or ig_meta.get('caption') or '')
@@ -78,16 +82,24 @@ jobs:
               full_yt_desc += '\n\nWATCH NEXT:\n' + watch_next
 
           if not os.path.exists('output.mp4'):
-              err = 'Remotion v9 render failed! Check GitHub Actions logs.'
+              err = 'Remotion v10 render failed (or VISUAL_GEN_FAILED)! Check GitHub Actions step logs.'
           else:
               try:
                   h = {'Authorization': f"Bearer {os.environ['GH_TOKEN']}", 'Accept': 'application/vnd.github+json'}
                   rel = requests.post(f"https://api.github.com/repos/{os.environ['GH_REPO']}/releases", headers=h, json={'tag_name': os.environ['JOB_ID'], 'name': os.environ['JOB_ID']}).json()
-                  up = rel['upload_url'].split('{')[0] + '?name=output.mp4'
+                  base_up = rel['upload_url'].split('{')[0]
                   with open('output.mp4', 'rb') as f:
-                      asset = requests.post(up, headers={**h, 'Content-Type': 'video/mp4'}, data=f.read()).json()
+                      asset = requests.post(base_up + '?name=output.mp4', headers={**h, 'Content-Type': 'video/mp4'}, data=f.read()).json()
                   video_url = asset.get('browser_download_url', '')
                   asset_api_url = asset.get('url', '')
+                  if os.path.exists('thumbnail.jpg'):
+                      with open('thumbnail.jpg', 'rb') as tf:
+                          ta = requests.post(base_up + '?name=thumbnail.jpg', headers={**h, 'Content-Type': 'image/jpeg'}, data=tf.read()).json()
+                      thumb_api_url = ta.get('url', '')
+                  if os.path.exists('captions.srt'):
+                      with open('captions.srt', 'rb') as sf:
+                          sa = requests.post(base_up + '?name=captions.srt', headers={**h, 'Content-Type': 'application/x-subrip'}, data=sf.read()).json()
+                      srt_api_url = sa.get('url', '')
               except Exception as e:
                   err += f'REL: {e} | '
               if 'yt' in targets and os.environ.get('YT_CREDS_B64'):
@@ -141,6 +153,7 @@ jobs:
           cb_body = {
               'job_id': os.environ['JOB_ID'],
               'mode': mode,
+              'template': payload.get('template', 'UiMotionPromo'),
               'sources': rmeta.get('sources', {}),
               'sfx': rmeta.get('sfx', []),
               'gate2_score': rmeta.get('gate2_score', 0),
@@ -151,6 +164,8 @@ jobs:
               'ig_url': ig_url,
               'video_url': video_url,
               'asset_api_url': asset_api_url,
+              'thumb_api_url': thumb_api_url,
+              'srt_api_url': srt_api_url,
               'error': err,
           }
           requests.post(callback_url, headers={'x-callback-secret': os.environ.get('CB_SECRET', ''), 'x-cb-token': cb_token}, json=cb_body, timeout=30)
