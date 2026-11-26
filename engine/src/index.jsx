@@ -5,7 +5,7 @@ import { VideoComposition } from './VideoComposition.jsx';
 const RemotionRoot = () => {
   return (
     <Composition
-      id='MainVideo'
+      id="MainVideo"
       component={VideoComposition}
       durationInFrames={900}
       fps={30}
@@ -17,6 +17,7 @@ const RemotionRoot = () => {
         fps: 30,
         durationInFrames: 900,
         mode: 'promo',
+        template: 'UiMotionPromo',
         palette: {
           bg: '#0B0E14',
           surface: '#141923',
@@ -28,6 +29,7 @@ const RemotionRoot = () => {
         brandName: 'ShockRadar AI',
         siteHost: 'shockradarai.pages.dev',
         autoDmKeyword: 'AI',
+        speakerLabels: { A: 'FOMO TRADER', B: 'QUANT SYSTEM' },
         tradeProof: null,
         scenes: [],
         words: [],
