@@ -739,13 +739,26 @@ const CleanSubtitles = ({ words, isLong, accent }) => {
   if (!words || !words.length) return null;
   const maxWords = isLong ? 5 : 2;
   const groups = [];
-  for (let i = 0; i < words.length; i += maxWords) {
-    const slice = words.slice(i, i + maxWords);
-    if (!slice.length) continue;
+  let cur = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    const sceneChanged = cur.length > 0 && w.sceneIdx !== undefined && cur[0].sceneIdx !== w.sceneIdx;
+    if (sceneChanged || cur.length >= maxWords) {
+      groups.push({
+        start: cur[0].startFrame,
+        end: cur[cur.length - 1].endFrame,
+        text: cur.map((x) => x.text).join(' '),
+        idx: groups.length,
+      });
+      cur = [];
+    }
+    cur.push(w);
+  }
+  if (cur.length) {
     groups.push({
-      start: slice[0].startFrame,
-      end: slice[slice.length - 1].endFrame,
-      text: slice.map((w) => w.text).join(' '),
+      start: cur[0].startFrame,
+      end: cur[cur.length - 1].endFrame,
+      text: cur.map((x) => x.text).join(' '),
       idx: groups.length,
     });
   }
