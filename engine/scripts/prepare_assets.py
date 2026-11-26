@@ -9,8 +9,8 @@ is_long = (mode == 'long')
 aspect = '16:9' if is_long else '9:16'
 W, H = (1920, 1080) if is_long else (1080, 1920)
 FPS = 30
-voice_a = payload.get('voice_name') or 'en-US-AndrewMultilingualNeural'
-voice_b = payload.get('voice_b_name') or 'en-US-AvaMultilingualNeural'
+voice_a = payload.get('voice_name') or 'en-US-AndrewNeural'
+voice_b = payload.get('voice_b_name') or 'en-US-AvaNeural'
 gen_scene_url = payload.get('gen_scene_url', '')
 qc_scene_url = payload.get('qc_scene_url', '')
 cb_token = payload.get('cb_token', '')
@@ -66,7 +66,7 @@ for idx, sc in enumerate(scenes):
     primary_v = voice_b if spk == 'B' else voice_a
     w_rel = []
     tts_ok = False
-    for cand in [primary_v, 'en-US-AndrewMultilingualNeural', 'en-US-ChristopherNeural', 'en-US-AvaMultilingualNeural']:
+    for cand in [primary_v, 'en-US-AndrewNeural', 'en-US-ChristopherNeural', 'en-US-AvaNeural']:
         try:
             w_rel = asyncio.run(synth_scene_tts(nar, raw_mp3, cand, rate_str))
             if os.path.exists(raw_mp3) and os.path.getsize(raw_mp3) > 800:
@@ -94,7 +94,7 @@ for idx, sc in enumerate(scenes):
         step = seg_dur / max(1, len(toks))
         w_rel = [(i * step, (i + 1) * step, w) for i, w in enumerate(toks)]
     for (ws, we, wt) in w_rel:
-        all_words.append({'start': cursor_sec + ws, 'end': cursor_sec + we, 'text': wt})
+        all_words.append({'start': cursor_sec + ws, 'end': cursor_sec + we, 'text': wt, 'sceneIdx': idx})
     st_f = int(round(cursor_sec * FPS))
     en_f = int(round((cursor_sec + seg_dur + pause_sec) * FPS))
     scene_timings.append((st_f, max(st_f + 24, en_f), cursor_sec))
@@ -292,6 +292,9 @@ for idx, sc in enumerate(scenes):
     st_f, en_f, _ = scene_timings[idx]
     remotion_scenes.append({**sc, 'startFrame': st_f, 'endFrame': en_f, 'imageFile': img_rel})
 
+if remotion_scenes:
+    remotion_scenes[-1]['endFrame'] = total_frames
+
 # Strict Quality Lock: NEVER silently ship blank dark frames when images were required!
 if images_needed >= 2 and images_ok == 0:
     raise RuntimeError('VISUAL_GEN_FAILED: 0/' + str(images_needed) + ' images generated! Ensure Cloudflare Workers AI binding (AI) is attached to Worker or set PEXELS_API_KEY.')
@@ -324,7 +327,7 @@ if is_long:
         y += 126
     comp_im.save('thumbnail.jpg', 'JPEG', quality=94)
 
-remotion_words = [{'startFrame': int(round(w['start'] * FPS)), 'endFrame': max(int(round(w['start'] * FPS)) + 3, int(round(w['end'] * FPS))), 'text': w['text']} for w in all_words]
+remotion_words = [{'startFrame': int(round(w['start'] * FPS)), 'endFrame': max(int(round(w['start'] * FPS)) + 3, int(round(w['end'] * FPS))), 'text': w['text'], 'sceneIdx': w.get('sceneIdx', 0)} for w in all_words]
 props = {
     'width': W,
     'height': H,
