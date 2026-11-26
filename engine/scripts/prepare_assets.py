@@ -176,11 +176,14 @@ def synth_fallback_sfx(cue, out_mp3):
 
 sfx_events = []
 sfx_cached_new = []
+SFX_STOP = {'a','an','the','sound','effect','effects','sfx','audio','sudden','final','subtle','soft','loud','ominous','hopeful','triumphant','dramatic','very','short'}
 for idx, sc in enumerate(scenes):
-    cue = str(sc.get('sfx_cue') or 'whoosh').strip()
-    if 'silence' in cue.lower() or 'none' in cue.lower():
+    raw_cue = str(sc.get('sfx_cue') or 'whoosh').strip()
+    if 'silence' in raw_cue.lower() or 'none' in raw_cue.lower():
         continue
-    slug = re.sub(r'[^a-z0-9]+', '_', cue.lower()).strip('_')[:32] or 'whoosh'
+    toks = [t for t in re.findall(r'[a-z0-9]+', raw_cue.lower()) if t not in SFX_STOP]
+    cue = ' '.join(toks[:2]) or 'whoosh'
+    slug = '_'.join(toks[:2])[:28] or 'whoosh'
     sfx_path = f'assets/sfx/{slug}.mp3'
     if not valid_audio(sfx_path):
         if fetch_web_audio(cue, sfx_path, max_sec=1.5):
@@ -280,7 +283,7 @@ def gen_and_qc_image(idx, sc):
 for idx, sc in enumerate(scenes):
     comp = str(sc.get('visual_component') or 'visual_metaphor')
     skip_for_stick = (template == 'TwoVoiceStick' and comp == 'visual_metaphor')
-    need_img = (comp in ('visual_metaphor', 'comic_panel', 'hook_headline')) and (not skip_for_stick) and bool(gen_scene_url)
+    need_img = (comp in ('visual_metaphor', 'comic_panel')) and (not skip_for_stick) and bool(gen_scene_url)
     img_rel = ''
     if need_img:
         images_needed += 1
