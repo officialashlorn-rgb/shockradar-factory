@@ -362,28 +362,24 @@ const HookHeadlineScene = ({ scene, palette, isLong }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const pop = spring({ frame, fps, config: { damping: 14, stiffness: 150 } });
+  const barW = interpolate(pop, [0, 1], [0, 180]);
   return (
     <AbsoluteFill
       style={{
-        backgroundColor: palette.bg,
+        background: 'radial-gradient(circle at 50% 42%, rgba(245,184,46,0.16) 0%, ' + palette.bg + ' 68%)',
         justifyContent: 'center',
         alignItems: 'center',
         padding: isLong ? '80px 140px 180px' : '140px 64px 440px',
       }}
     >
-      {scene.imageFile && (
-        <Img
-          src={staticFile(scene.imageFile)}
-          style={{ position: 'absolute', width: '100%', height: '100%', objectFit: 'cover', opacity: 0.25, filter: 'blur(5px)' }}
-        />
-      )}
       <DustParticles accent={palette.accent} />
-      <div style={{ transform: 'scale(' + interpolate(pop, [0, 1], [0.88, 1]) + ')', zIndex: 5 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', transform: 'scale(' + interpolate(pop, [0, 1], [0.88, 1]) + ')', zIndex: 5 }}>
+        <div style={{ width: barW, height: 7, borderRadius: 99, backgroundColor: palette.accent, marginBottom: 30, boxShadow: '0 0 24px ' + palette.accent }} />
         <HighlightedHeadline
           text={scene.on_screen_headline || scene.narration.split(' ').slice(0, 6).join(' ')}
           accentWord={scene.accent_word}
           accent={palette.accent}
-          size={isLong ? 82 : 80}
+          size={isLong ? 82 : 78}
         />
       </div>
     </AbsoluteFill>
@@ -492,8 +488,9 @@ const StatCounterScene = ({ scene, palette, isLong }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const pop = spring({ frame, fps, config: { damping: 14, stiffness: 120 } });
-  const match = String((scene.on_screen_headline || '') + ' ' + (scene.narration || '')).match(/([+-]?\$?\d+(?:[.,]\d+)?%?)/);
-  const bigStat = match ? match[1] : '90%';
+  const match = String((scene.on_screen_headline || '') + ' ' + (scene.narration || '')).match(/([+-]?\$?\d+(?:[.,]\d+)?(?:[BMK%]|\s?(?:billion|million|trillion|days|hours|minutes|years))?)/i);
+  if (!match) return <HookHeadlineScene scene={scene} palette={palette} isLong={isLong} />;
+  const bigStat = match[1].trim().toUpperCase();
   return (
     <AbsoluteFill
       style={{
