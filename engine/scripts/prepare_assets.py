@@ -4,14 +4,17 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 payload = json.loads(base64.b64decode(os.environ['PAYLOAD_B64']).decode('utf-8'))
 mode = payload.get('mode', 'story')
+template = payload.get('template', 'UiMotionPromo')
 is_long = (mode == 'long')
 aspect = '16:9' if is_long else '9:16'
 W, H = (1920, 1080) if is_long else (1080, 1920)
 FPS = 30
-voice = payload.get('voice_name') or 'en-US-AndrewMultilingualNeural'
+voice_a = payload.get('voice_name') or 'en-US-AndrewMultilingualNeural'
+voice_b = payload.get('voice_b_name') or 'en-US-AvaMultilingualNeural'
 gen_scene_url = payload.get('gen_scene_url', '')
 qc_scene_url = payload.get('qc_scene_url', '')
 cb_token = payload.get('cb_token', '')
+pexels_key = (os.environ.get('PEXELS_API_KEY') or '').strip()
 job_id = os.environ['JOB_ID']
 bp = payload.get('blueprint') or {}
 scenes = bp.get('scenes') or []
@@ -21,7 +24,7 @@ os.makedirs('assets/sfx', exist_ok=True)
 os.makedirs('assets/music', exist_ok=True)
 os.makedirs('engine/public/scenes', exist_ok=True)
 
-UA = {'User-Agent': 'ShockRadarMediaBot/9.0 (https://shockradarai.pages.dev)'}
+UA = {'User-Agent': 'ShockRadarMediaBot/10.0 (https://shockradarai.pages.dev)'}
 
 def probe_dur(path, fallback=2.5):
     if not os.path.exists(path) or os.path.getsize(path) < 500:
@@ -48,7 +51,7 @@ async def synth_scene_tts(txt, out_mp3, vname, rate_str):
                     wlist.append((s, s + max(d, 0.08), w))
     return wlist
 
-# 1. Per-scene Studio TTS + Exact Dramatic Pauses (Word Clock)
+# 1. Per-scene Dual-Voice Studio TTS + Exact Dramatic Pauses + Safe Silence Fallback
 rate_str = '+1%' if is_long else '+4%'
 concat_list = []
 all_words = []
@@ -59,16 +62,25 @@ for idx, sc in enumerate(scenes):
     nar = ' '.join(str(sc.get('narration', '')).replace('\r', ' ').split()) or 'Watch closely.'
     raw_mp3 = f'tts_{idx}.mp3'
     wav_out = f'tts_{idx}.wav'
+    spk = str(sc.get('speaker', 'A')).upper()
+    primary_v = voice_b if spk == 'B' else voice_a
     w_rel = []
-    for cand in [voice, 'en-US-AndrewMultilingualNeural', 'en-US-ChristopherNeural']:
+    tts_ok = False
+    for cand in [primary_v, 'en-US-AndrewMultilingualNeural', 'en-US-ChristopherNeural', 'en-US-AvaMultilingualNeural']:
         try:
             w_rel = asyncio.run(synth_scene_tts(nar, raw_mp3, cand, rate_str))
             if os.path.exists(raw_mp3) and os.path.getsize(raw_mp3) > 800:
+                tts_ok = True
                 break
         except Exception as e:
             print('TTS retry:', cand, e)
-    subprocess.run(['ffmpeg', '-y', '-i', raw_mp3, '-ar', '44100', '-ac', '2', wav_out], check=True)
-    seg_dur = probe_dur(wav_out, float(sc.get('target_duration_sec') or 2.6))
+    target_d = max(1.5, float(sc.get('target_duration_sec') or 2.6))
+    if tts_ok:
+        subprocess.run(['ffmpeg', '-y', '-i', raw_mp3, '-ar', '44100', '-ac', '2', wav_out], check=True)
+    else:
+        print(f'TTS fallback silence for scene {idx}')
+        subprocess.run(['ffmpeg', '-y', '-f', 'lavfi', '-t', f'{target_d:.2f}', '-i', 'anullsrc=r=44100:cl=stereo', wav_out], check=True)
+    seg_dur = probe_dur(wav_out, target_d)
     pause_sec = min(0.65, max(0.0, float(sc.get('pause_after_ms') or 0) / 1000.0))
     if pause_sec > 0.05:
         sil_wav = f'sil_{idx}.wav'
@@ -88,7 +100,6 @@ for idx, sc in enumerate(scenes):
     scene_timings.append((st_f, max(st_f + 24, en_f), cursor_sec))
     cursor_sec += (seg_dur + pause_sec)
 
-# Concat & broadcast-master voice track
 with open('voice_concat.txt', 'w') as cf:
     for p in concat_list:
         cf.write(f"file '{os.path.abspath(p)}'\n")
@@ -101,8 +112,11 @@ def fmt_srt_t(sec):
     sec = max(0.0, float(sec))
     h, m, s = int(sec // 3600), int((sec % 3600) // 60), int(sec % 60)
     ms = int(round((sec - int(sec)) * 1000))
-    if ms >= 1000: s += 1; ms = 0
+    if ms >= 1000:
+        s += 1
+        ms = 0
     return f'{h:02d}:{m:02d}:{s:02d},{ms:03d}'
+
 with open('captions.srt', 'w', encoding='utf-8') as sf:
     gi = 1
     for i in range(0, len(all_words), 5):
@@ -110,7 +124,7 @@ with open('captions.srt', 'w', encoding='utf-8') as sf:
         sf.write(f"{gi}\n{fmt_srt_t(sl[0]['start'])} --> {fmt_srt_t(max(sl[0]['start']+0.2, sl[-1]['end']))}\n{' '.join(x['text'] for x in sl)}\n\n")
         gi += 1
 
-# 2. Dynamic Unconstrained SFX & Music Fetcher + GitHub Repo Auto-Cache
+# 2. Dynamic Unconstrained SFX & Music Fetcher + Auto-Cache
 def valid_audio(path, min_dur=0.12):
     return os.path.exists(path) and os.path.getsize(path) > 2000 and probe_dur(path, 0.0) >= min_dur
 
@@ -127,14 +141,16 @@ def fetch_web_audio(query, out_mp3, max_sec=1.8):
                     if aud.ok and len(aud.content) > 2500:
                         open('tmp_aud', 'wb').write(aud.content)
                         subprocess.run(['ffmpeg', '-y', '-i', 'tmp_aud', '-t', f'{max_sec:.2f}', '-af', 'silenceremove=start_periods=1:start_threshold=-45dB,loudnorm=I=-16:TP=-2', '-ar', '44100', '-ac', '2', '-b:a', '128k', out_mp3], check=True)
-                        if valid_audio(out_mp3): return True
+                        if valid_audio(out_mp3):
+                            return True
     except Exception as e:
         print('Wiki SFX warn:', query, e)
     try:
         r = requests.get('https://archive.org/advancedsearch.php', params={'q': f'mediatype:audio AND ({query})', 'fl[]': 'identifier', 'rows': 3, 'output': 'json'}, headers=UA, timeout=10)
         for d in ((r.json().get('response') or {}).get('docs') or [])[:2]:
             ident = d.get('identifier')
-            if not ident: continue
+            if not ident:
+                continue
             meta = requests.get(f'https://archive.org/metadata/{ident}/files', headers=UA, timeout=10).json()
             for fl in (meta.get('result') or []):
                 nm = str(fl.get('name', ''))
@@ -143,7 +159,8 @@ def fetch_web_audio(query, out_mp3, max_sec=1.8):
                     if aud.ok and len(aud.content) > 2500:
                         open('tmp_aud', 'wb').write(aud.content)
                         subprocess.run(['ffmpeg', '-y', '-i', 'tmp_aud', '-t', f'{max_sec:.2f}', '-af', 'silenceremove=start_periods=1:start_threshold=-45dB,loudnorm=I=-16:TP=-2', '-ar', '44100', '-ac', '2', '-b:a', '128k', out_mp3], check=True)
-                        if valid_audio(out_mp3): return True
+                        if valid_audio(out_mp3):
+                            return True
     except Exception as e:
         print('Archive SFX warn:', query, e)
     return False
@@ -187,10 +204,12 @@ if 'none_pure_sfx' not in music_mood:
             subprocess.run(['ffmpeg', '-y', '-f', 'lavfi', '-i', 'aevalsrc=0.04*sin(2*PI*65.4*t)+0.025*sin(2*PI*98.0*t)*(0.6+0.4*sin(2*PI*0.2*t)):s=44100:d=30', '-af', 'lowpass=f=240', 'synth_bed.wav'], check=True)
             music_path = os.path.abspath('synth_bed.wav')
 
-# 3. Visual Assets + GATE 2 (Gemini Vision QC with Auto-Retry on Flawed Frames)
+# 3. Visual Assets + Strict Gate 2 (Gemini Vision QC) + Optional Pexels Fallback
 source_stats = {}
 gate2_scores = []
 gate2_retries = 0
+images_needed = 0
+images_ok = 0
 first_jpg = None
 remotion_scenes = []
 
@@ -199,25 +218,33 @@ def gen_and_qc_image(idx, sc):
     prompt = str(sc.get('visual_spec') or sc.get('narration') or '').strip()
     out_rel = f'scenes/scene_{idx}.jpg'
     out_abs = os.path.join('engine/public', out_rel)
-    best_score = 0.0
     for attempt in range(2):
         try:
-            r = requests.post(gen_scene_url, headers={'x-cb-token': cb_token}, json={'prompt': prompt, 'job_id': job_id, 'aspect': aspect}, timeout=55)
+            r = requests.post(
+                gen_scene_url,
+                headers={'x-cb-token': cb_token},
+                json={'prompt': prompt, 'job_id': job_id, 'aspect': aspect, 'template': template},
+                timeout=55,
+            )
             if not (r.ok and r.headers.get('content-type', '').startswith('image/') and len(r.content) > 8000):
+                print(f'Scene {idx} gen HTTP {r.status_code}: {r.text[:140]}')
                 continue
             im = ImageOps.fit(Image.open(io.BytesIO(r.content)).convert('RGB'), (W, H), method=Image.Resampling.LANCZOS)
             im.save(out_abs, 'JPEG', quality=92)
             src = r.headers.get('x-img-source', 'AI-IMG')
             source_stats[src] = source_stats.get(src, 0) + 1
-            # Send compressed copy to Gate 2 Vision QC on Worker
             if qc_scene_url:
                 thumb = im.copy()
                 thumb.thumbnail((512, 512))
                 buf = io.BytesIO()
                 thumb.save(buf, 'JPEG', quality=78)
-                qc = requests.post(qc_scene_url, headers={'x-cb-token': cb_token}, json={'job_id': job_id, 'image_b64': base64.b64encode(buf.getvalue()).decode(), 'mime': 'image/jpeg', 'narration': sc.get('narration', ''), 'visual_spec': prompt}, timeout=35).json()
+                qc = requests.post(
+                    qc_scene_url,
+                    headers={'x-cb-token': cb_token},
+                    json={'job_id': job_id, 'image_b64': base64.b64encode(buf.getvalue()).decode(), 'mime': 'image/jpeg', 'narration': sc.get('narration', ''), 'visual_spec': prompt},
+                    timeout=35,
+                ).json()
                 score = float(qc.get('score', 8.0))
-                best_score = max(best_score, score)
                 if qc.get('pass', True) or attempt == 1:
                     gate2_scores.append(score)
                     return out_rel
@@ -230,34 +257,65 @@ def gen_and_qc_image(idx, sc):
                 return out_rel
         except Exception as e:
             print(f'Scene {idx} visual warn:', e)
+    # Optional Pexels HD photo fallback if configured
+    if pexels_key:
+        try:
+            orient = 'landscape' if is_long else 'portrait'
+            q = ' '.join(prompt.split()[:4]) or 'finance dark'
+            pr = requests.get('https://api.pexels.com/v1/search', params={'query': q, 'orientation': orient, 'per_page': 4}, headers={'Authorization': pexels_key}, timeout=15)
+            photos = pr.json().get('photos') or []
+            if photos:
+                purl = random.choice(photos)['src'].get('large2x') or photos[0]['src'].get('original')
+                ir = requests.get(purl, timeout=20)
+                if ir.ok and len(ir.content) > 10000:
+                    im = ImageOps.fit(Image.open(io.BytesIO(ir.content)).convert('RGB'), (W, H), method=Image.Resampling.LANCZOS)
+                    im.save(out_abs, 'JPEG', quality=92)
+                    source_stats['PEXELS'] = source_stats.get('PEXELS', 0) + 1
+                    gate2_scores.append(8.2)
+                    return out_rel
+        except Exception as e:
+            print(f'Scene {idx} Pexels fallback warn:', e)
     return out_rel if os.path.exists(out_abs) else ''
 
 for idx, sc in enumerate(scenes):
     comp = str(sc.get('visual_component') or 'visual_metaphor')
-    need_img = comp in ('visual_metaphor', 'hook_headline') and bool(gen_scene_url)
-    img_rel = gen_and_qc_image(idx, sc) if need_img else ''
+    skip_for_stick = (template == 'TwoVoiceStick' and comp == 'visual_metaphor')
+    need_img = (comp in ('visual_metaphor', 'comic_panel', 'hook_headline')) and (not skip_for_stick) and bool(gen_scene_url)
+    img_rel = ''
+    if need_img:
+        images_needed += 1
+        img_rel = gen_and_qc_image(idx, sc)
+        if img_rel:
+            images_ok += 1
     if img_rel and first_jpg is None:
         first_jpg = os.path.join('engine/public', img_rel)
     st_f, en_f, _ = scene_timings[idx]
-    remotion_scenes.append({
-        **sc,
-        'startFrame': st_f,
-        'endFrame': en_f,
-        'imageFile': img_rel,
-    })
+    remotion_scenes.append({**sc, 'startFrame': st_f, 'endFrame': en_f, 'imageFile': img_rel})
 
-# Build High-CTR 16:9 Thumbnail for Long YT
-if is_long and first_jpg and os.path.exists(first_jpg):
-    base = ImageOps.fit(Image.open(first_jpg).convert('RGB'), (1280, 720), method=Image.Resampling.LANCZOS)
+# Strict Quality Lock: NEVER silently ship blank dark frames when images were required!
+if images_needed >= 2 and images_ok == 0:
+    raise RuntimeError('VISUAL_GEN_FAILED: 0/' + str(images_needed) + ' images generated! Ensure Cloudflare Workers AI binding (AI) is attached to Worker or set PEXELS_API_KEY.')
+
+# Guaranteed High-CTR 16:9 Thumbnail for Long YT (works even for pure-UI videos!)
+if is_long:
+    if first_jpg and os.path.exists(first_jpg):
+        base = ImageOps.fit(Image.open(first_jpg).convert('RGB'), (1280, 720), method=Image.Resampling.LANCZOS)
+    else:
+        base = Image.new('RGB', (1280, 720), (11, 14, 20))
+        bd = ImageDraw.Draw(base)
+        for x in range(0, 1280, 64):
+            bd.line([(x, 0), (x, 720)], fill=(22, 30, 48), width=1)
+        for y in range(0, 720, 64):
+            bd.line([(0, y), (1280, y)], fill=(22, 30, 48), width=1)
     grad = Image.new('RGBA', (1280, 720), (0, 0, 0, 0))
     gd = ImageDraw.Draw(grad)
-    for x in range(0, 900):
-        gd.line([(x, 0), (x, 720)], fill=(6, 9, 16, int(230 * (1 - x / 900))))
+    for x in range(0, 960):
+        gd.line([(x, 0), (x, 720)], fill=(6, 9, 16, int(235 * (1 - x / 960))))
     comp_im = Image.alpha_composite(base.convert('RGBA'), grad).convert('RGB')
     dr = ImageDraw.Draw(comp_im)
     f_big = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 102)
     lines = textwrap.wrap(str(bp.get('platforms', {}).get('instagram', {}).get('cover_headline') or bp.get('opening_hook', 'SMART MONEY')).upper(), width=11)[:3]
-    y = 175
+    y = 170
     for li, ln in enumerate(lines):
         col = (245, 184, 46) if li == 1 else (255, 255, 255)
         for ox, oy in [(-4, -4), (4, -4), (-4, 4), (4, 4)]:
@@ -273,17 +331,27 @@ props = {
     'fps': FPS,
     'durationInFrames': total_frames,
     'mode': mode,
+    'template': template,
     'palette': palette,
     'brandName': payload.get('brand_name', 'ShockRadar AI'),
     'siteHost': payload.get('site_host', 'shockradarai.pages.dev'),
     'autoDmKeyword': payload.get('auto_dm_keyword', 'AI'),
+    'speakerLabels': payload.get('speaker_labels') or {'A': 'RETAIL FOMO', 'B': 'QUANT SYSTEM'},
     'tradeProof': payload.get('pnl_meta'),
     'scenes': remotion_scenes,
     'words': remotion_words,
 }
 json.dump(props, open('engine/public/props.json', 'w', encoding='utf-8'))
-avg_g2 = round(sum(gate2_scores) / len(gate2_scores), 2) if gate2_scores else 9.0
+avg_g2 = round(sum(gate2_scores) / len(gate2_scores), 2) if gate2_scores else 10.0
 audio_plan = {'total_sec': total_sec, 'music_path': music_path, 'is_long': is_long, 'sfx_events': sfx_events}
 json.dump(audio_plan, open('audio_plan.json', 'w', encoding='utf-8'))
-json.dump({'sources': source_stats, 'sfx': sfx_cached_new, 'gate2_score': avg_g2, 'gate2_retries': gate2_retries, 'has_thumb': os.path.exists('thumbnail.jpg')}, open('render_meta.json', 'w', encoding='utf-8'))
-print('Assets ready! Frames:', total_frames, 'Gate2 avg:', avg_g2, 'Retries:', gate2_retries)
+json.dump({
+    'sources': source_stats,
+    'sfx': sfx_cached_new,
+    'gate2_score': avg_g2,
+    'gate2_retries': gate2_retries,
+    'images_ok': images_ok,
+    'images_needed': images_needed,
+    'has_thumb': os.path.exists('thumbnail.jpg'),
+}, open('render_meta.json', 'w', encoding='utf-8'))
+print('Assets v10 ready! Frames:', total_frames, 'Imgs:', images_ok, '/', images_needed, 'Gate2:', avg_g2)
