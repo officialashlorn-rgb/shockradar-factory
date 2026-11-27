@@ -672,7 +672,7 @@ const ProofZoomScene = ({ scene, tradeProof, palette, brandName, siteHost, isLon
 const AutoDmOutroScene = ({ palette, autoDmKeyword, brandName, siteHost, isLong }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const kw = String(autoDmKeyword || 'AI').toUpperCase();
+  const kw = String(autoDmKeyword || '1').toUpperCase();
   const typedLen = Math.min(kw.length, Math.floor(frame / 4) + 1);
   const dmPop = spring({ frame: Math.max(0, frame - 20), fps, config: { damping: 13, stiffness: 150 } });
   return (
@@ -730,11 +730,11 @@ const AutoDmOutroScene = ({ palette, autoDmKeyword, brandName, siteHost, isLong 
   );
 };
 
-// Positioned strictly in the Safe Zone below all cards (ZERO overlap!)
+// Positioned strictly in the Safe Zone with Karaoke Active-Word Highlight (ZERO overlap & ZERO desync!)
 const CleanSubtitles = ({ words, isLong, accent }) => {
   const frame = useCurrentFrame();
   if (!words || !words.length) return null;
-  const maxWords = isLong ? 5 : 2;
+  const maxWords = 3;
   const groups = [];
   let cur = [];
   for (let i = 0; i < words.length; i++) {
@@ -744,8 +744,7 @@ const CleanSubtitles = ({ words, isLong, accent }) => {
       groups.push({
         start: cur[0].startFrame,
         end: cur[cur.length - 1].endFrame,
-        text: cur.map((x) => x.text).join(' '),
-        idx: groups.length,
+        items: cur,
       });
       cur = [];
     }
@@ -755,22 +754,20 @@ const CleanSubtitles = ({ words, isLong, accent }) => {
     groups.push({
       start: cur[0].startFrame,
       end: cur[cur.length - 1].endFrame,
-      text: cur.map((x) => x.text).join(' '),
-      idx: groups.length,
+      items: cur,
     });
   }
-  const active = groups.find((g) => frame >= g.start && frame <= g.end + 2);
+  const active = groups.find((g) => frame >= g.start - 1 && frame <= g.end + 2);
   if (!active) return null;
-  const local = frame - active.start;
-  const sc = interpolate(local, [0, 4], [0.92, 1], { extrapolateRight: 'clamp' });
-  const txtCol = active.idx % 4 === 2 ? accent : '#FFFFFF';
+  const local = Math.max(0, frame - active.start);
+  const sc = interpolate(local, [0, 3], [0.94, 1], { extrapolateRight: 'clamp' });
   return (
     <div
       style={{
         position: 'absolute',
-        left: isLong ? 120 : 64,
-        right: isLong ? 120 : 64,
-        bottom: isLong ? 62 : 295,
+        left: 56,
+        right: 56,
+        bottom: 295,
         display: 'flex',
         justifyContent: 'center',
         pointerEvents: 'none',
@@ -780,20 +777,37 @@ const CleanSubtitles = ({ words, isLong, accent }) => {
       <div
         style={{
           transform: 'scale(' + sc + ')',
-          backgroundColor: 'rgba(8,10,16,0.82)',
-          border: '1.5px solid rgba(255,255,255,0.14)',
-          padding: isLong ? '12px 28px' : '14px 28px',
+          backgroundColor: 'rgba(8,10,16,0.86)',
+          border: '1.5px solid rgba(255,255,255,0.16)',
+          padding: '14px 26px',
           borderRadius: 18,
           fontFamily: FONT_SANS,
-          fontSize: isLong ? 42 : 58,
+          fontSize: 54,
           fontWeight: 900,
-          color: txtCol,
           textAlign: 'center',
           letterSpacing: '-0.01em',
-          textShadow: '0 4px 16px rgba(0,0,0,0.9)',
+          textShadow: '0 4px 16px rgba(0,0,0,0.95)',
+          display: 'flex',
+          flexWrap: 'wrap',
+          justifyContent: 'center',
+          gap: 12,
         }}
       >
-        {active.text}
+        {active.items.map((wItem, wi) => {
+          const isSpoken = frame >= wItem.startFrame && frame <= wItem.endFrame + 1;
+          return (
+            <span
+              key={wi}
+              style={{
+                color: isSpoken ? accent : '#F8FAFC',
+                transform: isSpoken ? 'scale(1.06)' : 'scale(1)',
+                display: 'inline-block',
+              }}
+            >
+              {wItem.text}
+            </span>
+          );
+        })}
       </div>
     </div>
   );
