@@ -36,7 +36,10 @@ def probe_dur(path, fallback=2.5):
         return fallback
 
 async def synth_scene_tts(txt, out_mp3, vname, rate_str):
-    comm = edge_tts.Communicate(txt, vname, rate=rate_str)
+    try:
+        comm = edge_tts.Communicate(txt, vname, rate=rate_str, boundary='WordBoundary')
+    except TypeError:
+        comm = edge_tts.Communicate(txt, vname, rate=rate_str)
     wlist = []
     with open(out_mp3, 'wb') as out_f:
         async for chunk in comm.stream():
@@ -91,8 +94,13 @@ for idx, sc in enumerate(scenes):
         concat_list.append(wav_out)
     if not w_rel:
         toks = [w for w in nar.split() if w]
-        step = seg_dur / max(1, len(toks))
-        w_rel = [(i * step, (i + 1) * step, w) for i, w in enumerate(toks)]
+        weights = [max(2.0, float(len(re.sub(r'[^a-zA-Z0-9]', '', w))) + (6.0 if any(ch.isdigit() for ch in w) else 0.0)) for w in toks]
+        tot_w = max(1.0, sum(weights))
+        acc_t = 0.0
+        for w, wt in zip(toks, weights):
+            dur_w = seg_dur * (wt / tot_w)
+            w_rel.append((acc_t, acc_t + dur_w, w))
+            acc_t += dur_w
     for (ws, we, wt) in w_rel:
         all_words.append({'start': cursor_sec + ws, 'end': cursor_sec + we, 'text': wt, 'sceneIdx': idx})
     st_f = int(round(cursor_sec * FPS))
@@ -341,7 +349,7 @@ props = {
     'palette': palette,
     'brandName': payload.get('brand_name', 'ShockRadar AI'),
     'siteHost': payload.get('site_host', 'shockradarai.pages.dev'),
-    'autoDmKeyword': payload.get('auto_dm_keyword', 'AI'),
+    'autoDmKeyword': payload.get('auto_dm_keyword', '1'),
     'speakerLabels': payload.get('speaker_labels') or {'A': 'RETAIL FOMO', 'B': 'QUANT SYSTEM'},
     'tradeProof': payload.get('pnl_meta'),
     'scenes': remotion_scenes,
