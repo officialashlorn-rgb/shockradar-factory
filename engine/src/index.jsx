@@ -28,7 +28,7 @@ const RemotionRoot = () => {
         },
         brandName: 'ShockRadar AI',
         siteHost: 'shockradarai.pages.dev',
-        autoDmKeyword: 'AI',
+        autoDmKeyword: '1',
         speakerLabels: { A: 'FOMO TRADER', B: 'QUANT SYSTEM' },
         tradeProof: null,
         scenes: [],
