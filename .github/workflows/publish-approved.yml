@@ -1,4 +1,4 @@
-name: ShockRadar Publish Approved Video v10 (Full SEO + No Re-Render)
+name: ShockRadar Publish Approved IG Reel v14 (No Re-Render)
 on:
   workflow_dispatch:
     inputs:
@@ -6,88 +6,28 @@ on:
       targets: { required: true, type: string }
       payload_b64: { required: true, type: string }
       ig_creds_b64: { required: false, type: string, default: '' }
-      yt_creds_b64: { required: false, type: string, default: '' }
 jobs:
   publish-only:
     runs-on: ubuntu-latest
     steps:
       - name: Install Publisher Deps
-        run: pip install -q requests google-auth google-api-python-client
-      - name: Download Approved Assets & Publish with Full SEO
+        run: pip install -q requests
+      - name: Publish Approved Reel to Instagram
         env:
           JOB_ID: ${{ inputs.job_id }}
           TARGETS: ${{ inputs.targets }}
           PAYLOAD_B64: ${{ inputs.payload_b64 }}
           IG_CREDS_B64: ${{ inputs.ig_creds_b64 }}
-          YT_CREDS_B64: ${{ inputs.yt_creds_b64 }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CB_SECRET: ${{ secrets.GH_CALLBACK_SECRET }}
         run: |
           python3 - << 'PYEOF'
           import os, json, base64, time, requests
-          from google.oauth2.credentials import Credentials
-          from googleapiclient.discovery import build
-          from googleapiclient.http import MediaFileUpload
           p = json.loads(base64.b64decode(os.environ['PAYLOAD_B64']).decode('utf-8'))
-          targets = [t.strip().lower() for t in os.environ['TARGETS'].split(',') if t.strip()]
-          mode = p.get('mode', 'story')
-          is_long = (mode == 'long')
+          mode = p.get('mode', 'promo')
           video_url = p.get('video_url', '')
-          asset_api_url = p.get('asset_api_url', '')
-          thumb_api_url = p.get('thumb_api_url', '')
-          srt_api_url = p.get('srt_api_url', '')
-          watch_next = p.get('watch_next', '')
-          yt_meta = (p.get('platforms') or {}).get('youtube') or {}
           ig_meta = (p.get('platforms') or {}).get('instagram') or {}
-          full_desc = str(yt_meta.get('description') or '')
-          if watch_next:
-              full_desc += '\n\nWATCH NEXT:\n' + watch_next
-          yt_url, ig_url, err = '', '', ''
-          gh_h = {'Authorization': f"Bearer {os.environ['GH_TOKEN']}", 'Accept': 'application/octet-stream'}
-          if 'yt' in targets and os.environ.get('YT_CREDS_B64'):
-              try:
-                  r = requests.get(asset_api_url, headers=gh_h, timeout=60) if asset_api_url else requests.get(video_url, timeout=60)
-                  open('approved.mp4', 'wb').write(r.content)
-                  c = json.loads(base64.b64decode(os.environ['YT_CREDS_B64']).decode())
-                  creds = Credentials(None, refresh_token=c['refreshToken'], token_uri='https://oauth2.googleapis.com/token', client_id=c['clientId'], client_secret=c['clientSecret'])
-                  yt = build('youtube', 'v3', credentials=creds)
-                  resp = yt.videos().insert(
-                      part='snippet,status',
-                      body={
-                          'snippet': {
-                              'title': str(yt_meta.get('title') or 'ShockRadar Quant #shorts')[:98],
-                              'description': full_desc[:4900],
-                              'tags': [str(t)[:30] for t in (yt_meta.get('tags') or ['crypto','trading','shorts'])[:15]],
-                              'categoryId': '27' if mode in ('edu', 'long') else '22',
-                              'defaultLanguage': 'en',
-                              'defaultAudioLanguage': 'en',
-                          },
-                          'status': {'privacyStatus': 'public', 'selfDeclaredMadeForKids': False, 'embeddable': True},
-                      },
-                      media_body=MediaFileUpload('approved.mp4', mimetype='video/mp4', resumable=True),
-                  ).execute()
-                  vid_id = resp['id']
-                  yt_url = f'https://youtu.be/{vid_id}' if is_long else f'https://youtube.com/shorts/{vid_id}'
-                  if is_long and thumb_api_url:
-                      try:
-                          tr = requests.get(thumb_api_url, headers=gh_h, timeout=30)
-                          if tr.ok and len(tr.content) > 2000:
-                              open('thumb.jpg', 'wb').write(tr.content)
-                              yt.thumbnails().set(videoId=vid_id, media_body=MediaFileUpload('thumb.jpg', mimetype='image/jpeg')).execute()
-                      except Exception: pass
-                  if srt_api_url:
-                      try:
-                          sr = requests.get(srt_api_url, headers=gh_h, timeout=30)
-                          if sr.ok and len(sr.content) > 20:
-                              open('caps.srt', 'wb').write(sr.content)
-                              yt.captions().insert(part='snippet', body={'snippet': {'videoId': vid_id, 'language': 'en', 'name': 'English', 'isDraft': False}}, media_body=MediaFileUpload('caps.srt', mimetype='application/octet-stream')).execute()
-                      except Exception: pass
-                  if yt_meta.get('pinned_comment'):
-                      try: yt.commentThreads().insert(part='snippet', body={'snippet': {'videoId': vid_id, 'topLevelComment': {'snippet': {'textOriginal': yt_meta['pinned_comment']}}}}).execute()
-                      except Exception: pass
-              except Exception as e:
-                  err += f'YT: {e} | '
-          if 'ig' in targets and not is_long and os.environ.get('IG_CREDS_B64') and video_url:
+          ig_url, err = '', ''
+          if os.environ.get('IG_CREDS_B64') and video_url:
               try:
                   c = json.loads(base64.b64decode(os.environ['IG_CREDS_B64']).decode())
                   cr = requests.post(f"https://graph.facebook.com/v21.0/{c['igUserId']}/media", json={'media_type': 'REELS', 'video_url': video_url, 'caption': ig_meta.get('caption', ''), 'access_token': c['accessToken']}).json()
@@ -101,6 +41,6 @@ jobs:
                   ig_url = f"https://instagram.com/reel/{pub.get('id', '')}"
               except Exception as e:
                   err += f'IG: {e}'
-          cb = {'job_id': os.environ['JOB_ID'], 'mode': mode, 'cb_token': p.get('cb_token',''), 'status': 'done' if (yt_url or ig_url) else 'error', 'yt_url': yt_url, 'ig_url': ig_url, 'video_url': video_url, 'error': err, 'is_approved_publish': True}
+          cb = {'job_id': os.environ['JOB_ID'], 'mode': mode, 'cb_token': p.get('cb_token',''), 'status': 'done' if ig_url else 'error', 'yt_url': '', 'ig_url': ig_url, 'video_url': video_url, 'error': err, 'is_approved_publish': True}
           requests.post(p.get('callback_url',''), headers={'x-callback-secret': os.environ.get('CB_SECRET',''), 'x-cb-token': p.get('cb_token','')}, json=cb, timeout=30)
           PYEOF
