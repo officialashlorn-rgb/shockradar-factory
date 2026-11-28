@@ -1,4 +1,4 @@
-name: ShockRadar Reels Factory v14 (4-Template Remotion + Gate 2 + IG)
+name: ShockRadar IG Smart Ads & Reels Factory v16
 on:
   workflow_dispatch:
     inputs:
@@ -9,7 +9,7 @@ on:
 permissions:
   contents: write
 jobs:
-  render-and-publish:
+  render-qc-publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,22 +18,33 @@ jobs:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: engine/package.json
-      - name: Install FFmpeg, Chromium Deps, Python & Remotion
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/huggingface
+          key: ig-factory-v16-whisper-tiny-${{ runner.os }}
+      - name: Install FFmpeg, Chromium Deps, Faster-Whisper & Remotion
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg fonts-dejavu-core libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2
           sudo apt-get install -y -qq libasound2t64 || sudo apt-get install -y -qq libasound2 || true
-          pip install -q edge-tts pillow requests
+          pip install -q edge-tts pillow requests faster-whisper
           npm --prefix engine install --no-audit --no-fund
           npx --prefix engine remotion browser ensure
-      - name: Prepare TTS, Word Clock, Gate 2 Vision QC & SFX
+      - name: Prepare TTS, Faster-Whisper Word Clock, Gate 2 Vision QC & SFX
         env:
           JOB_ID: ${{ inputs.job_id }}
           PAYLOAD_B64: ${{ inputs.payload_b64 }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         run: python3 engine/scripts/prepare_assets.py
-      - name: Render Remotion Reel & Mix Audio
+      - name: Render Remotion 9:16 Reel & Mix Audio
         run: node engine/scripts/render_and_mix.mjs
+      - name: Post-Render Technical QC + AI Quality Review (Bounded Retry Loop)
+        env:
+          JOB_ID: ${{ inputs.job_id }}
+          PAYLOAD_B64: ${{ inputs.payload_b64 }}
+        run: python3 engine/scripts/post_render_qc.py
       - name: Cache Downloaded SFX & Music to Repo
         if: success()
         continue-on-error: true
@@ -46,7 +57,7 @@ jobs:
             git pull --rebase origin main || true
             git push origin HEAD:main || true
           fi
-      - name: Upload Release Assets, Publish IG Reel & Callback
+      - name: Upload Release Asset, Optional IG Publish & Callback
         if: always()
         env:
           JOB_ID: ${{ inputs.job_id }}
@@ -61,16 +72,26 @@ jobs:
           import os, json, base64, time, requests
           payload = json.loads(base64.b64decode(os.environ['PAYLOAD_B64']).decode('utf-8'))
           bp = payload.get('blueprint') or {}
-          plats = bp.get('platforms') or {}
-          ig_meta = plats.get('instagram') or {}
-          mode = payload.get('mode', 'promo')
+          ig_meta = (bp.get('platforms') or {}).get('instagram') or {}
+          fmt = payload.get('format', 'smart_ad')
           targets = [t.strip().lower() for t in os.environ['TARGETS'].split(',') if t.strip()]
           callback_url = payload.get('callback_url', '')
           cb_token = payload.get('cb_token', '')
-          yt_url, ig_url, video_url, asset_api_url, err = '', '', '', '', ''
+          ig_url, ig_media_id, video_url, asset_api_url, err = '', '', '', '', ''
+          token_expired = False
           rmeta = json.load(open('render_meta.json')) if os.path.exists('render_meta.json') else {}
+          qcreport = json.load(open('qc_report.json')) if os.path.exists('qc_report.json') else {}
+
+          def build_ig_caption(meta):
+              cap = str(meta.get('caption') or '').strip()
+              tags = [str(t).strip() for t in (meta.get('hashtags') or []) if str(t).strip()]
+              tags_str = ' '.join(t if t.startswith('#') else ('#' + t) for t in tags[:10])
+              if tags_str and tags_str.split()[0].lower() not in cap.lower():
+                  return (cap + '\n\n' + tags_str).strip()
+              return cap
+
           if not os.path.exists('output.mp4'):
-              err = 'Remotion v14 render failed! Check GitHub Actions step logs.'
+              err = 'Remotion v16 render or Technical QC failed! Check GitHub Actions logs.'
           else:
               try:
                   h = {'Authorization': f"Bearer {os.environ['GH_TOKEN']}", 'Accept': 'application/vnd.github+json'}
@@ -82,35 +103,75 @@ jobs:
                   asset_api_url = asset.get('url', '')
               except Exception as e:
                   err += f'REL: {e} | '
-              if 'ig' in targets and os.environ.get('IG_CREDS_B64') and video_url:
-                  try:
-                      c = json.loads(base64.b64decode(os.environ['IG_CREDS_B64']).decode())
-                      cr = requests.post(f"https://graph.facebook.com/v21.0/{c['igUserId']}/media", json={'media_type': 'REELS', 'video_url': video_url, 'caption': ig_meta.get('caption', ''), 'access_token': c['accessToken']}).json()
-                      cid = cr['id']
-                      for _ in range(24):
-                          time.sleep(5)
-                          st = requests.get(f"https://graph.facebook.com/v21.0/{cid}?fields=status_code&access_token={c['accessToken']}").json().get('status_code')
-                          if st == 'FINISHED': break
-                          if st == 'ERROR': raise RuntimeError('Meta video processing error')
-                      pub = requests.post(f"https://graph.facebook.com/v21.0/{c['igUserId']}/media_publish", json={'creation_id': cid, 'access_token': c['accessToken']}).json()
-                      ig_url = f"https://instagram.com/reel/{pub.get('id', '')}"
-                  except Exception as e:
-                      err += f'IG: {e}'
-          ok = bool(ig_url or ('preview' in targets and (video_url or asset_api_url)))
+
+              if 'ig' in targets and os.environ.get('IG_CREDS_B64') and video_url and qcreport.get('pass', True):
+                  c = json.loads(base64.b64decode(os.environ['IG_CREDS_B64']).decode())
+                  full_caption = build_ig_caption(ig_meta)
+                  for pub_try in range(3):
+                      try:
+                          cr = requests.post(
+                              f"https://graph.facebook.com/v21.0/{c['igUserId']}/media",
+                              json={'media_type': 'REELS', 'video_url': video_url, 'caption': full_caption, 'access_token': c['accessToken']},
+                              timeout=30,
+                          ).json()
+                          if cr.get('error'):
+                              if cr['error'].get('code') == 190:
+                                  token_expired = True
+                                  raise RuntimeError('TOKEN_EXPIRED: ' + str(cr['error'].get('message')))
+                              raise RuntimeError(str(cr['error'].get('message')))
+                          cid = cr['id']
+                          for _ in range(28):
+                              time.sleep(5)
+                              st_j = requests.get(f"https://graph.facebook.com/v21.0/{cid}?fields=status_code&access_token={c['accessToken']}", timeout=20).json()
+                              st = st_j.get('status_code')
+                              if st == 'FINISHED':
+                                  break
+                              if st == 'ERROR':
+                                  raise RuntimeError('Meta video processing error')
+                          pub = requests.post(
+                              f"https://graph.facebook.com/v21.0/{c['igUserId']}/media_publish",
+                              json={'creation_id': cid, 'access_token': c['accessToken']},
+                              timeout=30,
+                          ).json()
+                          if pub.get('error'):
+                              if pub['error'].get('code') == 190:
+                                  token_expired = True
+                              raise RuntimeError(str(pub['error'].get('message')))
+                          ig_media_id = str(pub.get('id', ''))
+                          ig_url = f"https://instagram.com/reel/{ig_media_id}" if ig_media_id else ''
+                          break
+                      except Exception as e:
+                          err = f'IG(try {pub_try + 1}): {e}'
+                          if token_expired or pub_try == 2:
+                              break
+                          time.sleep(8 * (pub_try + 1))
+
+          if ig_media_id:
+              final_state = 'published'
+          elif video_url and ('preview' in targets or not qcreport.get('pass', True)):
+              final_state = 'awaiting_review'
+          elif video_url and not err:
+              final_state = 'generated'
+          else:
+              final_state = 'failed'
+
           cb_body = {
               'job_id': os.environ['JOB_ID'],
-              'mode': mode,
-              'template': payload.get('template', 'UiMotionPromo'),
+              'format': fmt,
+              'template': payload.get('template', 'StoryAdFlow'),
               'sources': rmeta.get('sources', {}),
+              'subtitle_engine': rmeta.get('subtitle_engine', 'edge-tts'),
               'sfx': rmeta.get('sfx', []),
               'gate2_score': rmeta.get('gate2_score', 0),
               'gate2_retries': rmeta.get('gate2_retries', 0),
+              'qc_report': qcreport,
               'cb_token': cb_token,
-              'status': 'done' if ok else 'error',
-              'yt_url': '',
+              'status': final_state,
+              'ig_media_id': ig_media_id,
               'ig_url': ig_url,
               'video_url': video_url,
               'asset_api_url': asset_api_url,
+              'token_expired': token_expired,
               'error': err,
           }
           requests.post(callback_url, headers={'x-callback-secret': os.environ.get('CB_SECRET', ''), 'x-cb-token': cb_token}, json=cb_body, timeout=30)
