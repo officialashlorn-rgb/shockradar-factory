@@ -8,7 +8,7 @@ const rootDir = process.cwd();
 const props = JSON.parse(fs.readFileSync(path.join(rootDir, 'engine/public/props.json'), 'utf-8'));
 const audioPlan = JSON.parse(fs.readFileSync(path.join(rootDir, 'audio_plan.json'), 'utf-8'));
 
-console.log('Bundling Remotion v10 engine...');
+console.log('Bundling Remotion v16 IG Engine...');
 const serveUrl = await bundle({
   entryPoint: path.join(rootDir, 'engine/src/index.jsx'),
   publicDir: path.join(rootDir, 'engine/public'),
@@ -20,7 +20,7 @@ const composition = await selectComposition({
   inputProps: props,
 });
 
-console.log('Rendering frames:', composition.durationInFrames, composition.width + 'x' + composition.height, 'Template:', props.template);
+console.log('Rendering frames:', composition.durationInFrames, composition.width + 'x' + composition.height, 'Format:', props.format, 'Template:', props.template);
 await renderMedia({
   composition,
   serveUrl,
@@ -42,8 +42,7 @@ let inIdx = 2;
 
 if (audioPlan.music_path && fs.existsSync(audioPlan.music_path)) {
   args.push('-stream_loop', '-1', '-i', audioPlan.music_path);
-  const mVol = audioPlan.is_long ? 0.08 : 0.11;
-  chains.push(`[${inIdx}:a]volume=${mVol},afade=t=in:st=0:d=0.6,afade=t=out:st=${fadeOut.toFixed(2)}:d=1.4[m_aud]`);
+  chains.push(`[${inIdx}:a]volume=0.10,afade=t=in:st=0:d=0.6,afade=t=out:st=${fadeOut.toFixed(2)}:d=1.4[m_aud]`);
   mixIns.push('[m_aud]');
   inIdx++;
 }
