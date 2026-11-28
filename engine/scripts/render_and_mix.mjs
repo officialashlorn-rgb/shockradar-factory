@@ -36,15 +36,20 @@ console.log('Mixing mastered voice + ducked music + SFX...');
 const totalSec = Number(audioPlan.total_sec) || composition.durationInFrames / 30;
 const fadeOut = Math.max(0.8, totalSec - 1.4);
 const args = ['-y', '-i', 'raw_remotion.mp4', '-i', 'voice_master.wav'];
-const chains = ['[1:a]volume=1.18,apad[v_aud]'];
-const mixIns = ['[v_aud]'];
+const chains = [];
+const mixIns = [];
 let inIdx = 2;
 
 if (audioPlan.music_path && fs.existsSync(audioPlan.music_path)) {
   args.push('-stream_loop', '-1', '-i', audioPlan.music_path);
-  chains.push(`[${inIdx}:a]volume=0.10,afade=t=in:st=0:d=0.6,afade=t=out:st=${fadeOut.toFixed(2)}:d=1.4[m_aud]`);
-  mixIns.push('[m_aud]');
+  chains.push('[1:a]volume=1.20,apad,asplit=2[v_main][v_sc]');
+  chains.push(`[${inIdx}:a]volume=0.16,afade=t=in:st=0:d=0.5,afade=t=out:st=${fadeOut.toFixed(2)}:d=1.3[m_raw]`);
+  chains.push('[m_raw][v_sc]sidechaincompress=threshold=0.025:ratio=5:attack=25:release=320:makeup=1[m_duck]');
+  mixIns.push('[v_main]', '[m_duck]');
   inIdx++;
+} else {
+  chains.push('[1:a]volume=1.20,apad[v_main]');
+  mixIns.push('[v_main]');
 }
 
 const sfxList = (audioPlan.sfx_events || []).slice(0, 14);
