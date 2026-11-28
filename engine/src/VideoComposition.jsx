@@ -711,18 +711,20 @@ const CleanSubtitles = ({ words, accent }) => {
           transform: 'scale(' + sc + ')',
           backgroundColor: 'rgba(8,10,16,0.88)',
           border: '1.5px solid rgba(255,255,255,0.16)',
-          padding: '14px 26px',
-          borderRadius: 18,
+          padding: '15px 32px',
+          borderRadius: 20,
           fontFamily: FONT_SANS,
-          fontSize: 52,
+          fontSize: 50,
           fontWeight: 900,
           textAlign: 'center',
-          letterSpacing: '-0.01em',
-          textShadow: '0 4px 16px rgba(0,0,0,0.95)',
+          letterSpacing: '0.01em',
+          textShadow: '0 4px 18px rgba(0,0,0,0.95)',
           display: 'flex',
           flexWrap: 'wrap',
           justifyContent: 'center',
-          gap: 12,
+          alignItems: 'baseline',
+          columnGap: 22,
+          rowGap: 10,
         }}
       >
         {active.items.map((wItem, wi) => {
@@ -732,8 +734,10 @@ const CleanSubtitles = ({ words, accent }) => {
               key={wi}
               style={{
                 color: isSpoken ? accent : '#F8FAFC',
-                transform: isSpoken ? 'scale(1.06)' : 'scale(1)',
+                transform: isSpoken ? 'translateY(-4px)' : 'translateY(0px)',
+                textShadow: isSpoken ? ('0 0 22px ' + accent + ', 0 4px 14px rgba(0,0,0,0.95)') : '0 4px 14px rgba(0,0,0,0.95)',
                 display: 'inline-block',
+                whiteSpace: 'pre',
               }}
             >
               {wItem.text}
