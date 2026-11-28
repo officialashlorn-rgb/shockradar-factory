@@ -1,21 +1,20 @@
-name: ShockRadar Publish Approved IG Reel v14 (No Re-Render)
+name: ShockRadar Publish Approved IG Reel v16 (Retry + Idempotent)
 on:
   workflow_dispatch:
     inputs:
       job_id: { required: true, type: string }
       targets: { required: true, type: string }
       payload_b64: { required: true, type: string }
-      ig_creds_b64: { required: false, type: string, default: '' }
+      ig_creds_b64: { required: true, type: string }
 jobs:
   publish-only:
     runs-on: ubuntu-latest
     steps:
       - name: Install Publisher Deps
         run: pip install -q requests
-      - name: Publish Approved Reel to Instagram
+      - name: Publish Approved Reel to Instagram (with Transient Retry)
         env:
           JOB_ID: ${{ inputs.job_id }}
-          TARGETS: ${{ inputs.targets }}
           PAYLOAD_B64: ${{ inputs.payload_b64 }}
           IG_CREDS_B64: ${{ inputs.ig_creds_b64 }}
           CB_SECRET: ${{ secrets.GH_CALLBACK_SECRET }}
@@ -23,24 +22,66 @@ jobs:
           python3 - << 'PYEOF'
           import os, json, base64, time, requests
           p = json.loads(base64.b64decode(os.environ['PAYLOAD_B64']).decode('utf-8'))
-          mode = p.get('mode', 'promo')
+          fmt = p.get('format', 'smart_ad')
           video_url = p.get('video_url', '')
           ig_meta = (p.get('platforms') or {}).get('instagram') or {}
-          ig_url, err = '', ''
+          cap = str(ig_meta.get('caption') or '').strip()
+          tags = [str(t).strip() for t in (ig_meta.get('hashtags') or []) if str(t).strip()]
+          tags_str = ' '.join(t if t.startswith('#') else ('#' + t) for t in tags[:10])
+          full_caption = (cap + '\n\n' + tags_str).strip() if (tags_str and tags_str.split()[0].lower() not in cap.lower()) else cap
+          ig_url, ig_media_id, err, token_expired = '', '', '', False
+
           if os.environ.get('IG_CREDS_B64') and video_url:
-              try:
-                  c = json.loads(base64.b64decode(os.environ['IG_CREDS_B64']).decode())
-                  cr = requests.post(f"https://graph.facebook.com/v21.0/{c['igUserId']}/media", json={'media_type': 'REELS', 'video_url': video_url, 'caption': ig_meta.get('caption', ''), 'access_token': c['accessToken']}).json()
-                  cid = cr['id']
-                  for _ in range(24):
-                      time.sleep(5)
-                      st = requests.get(f"https://graph.facebook.com/v21.0/{cid}?fields=status_code&access_token={c['accessToken']}").json().get('status_code')
-                      if st == 'FINISHED': break
-                      if st == 'ERROR': raise RuntimeError('Meta processing error')
-                  pub = requests.post(f"https://graph.facebook.com/v21.0/{c['igUserId']}/media_publish", json={'creation_id': cid, 'access_token': c['accessToken']}).json()
-                  ig_url = f"https://instagram.com/reel/{pub.get('id', '')}"
-              except Exception as e:
-                  err += f'IG: {e}'
-          cb = {'job_id': os.environ['JOB_ID'], 'mode': mode, 'cb_token': p.get('cb_token',''), 'status': 'done' if ig_url else 'error', 'yt_url': '', 'ig_url': ig_url, 'video_url': video_url, 'error': err, 'is_approved_publish': True}
-          requests.post(p.get('callback_url',''), headers={'x-callback-secret': os.environ.get('CB_SECRET',''), 'x-cb-token': p.get('cb_token','')}, json=cb, timeout=30)
+              c = json.loads(base64.b64decode(os.environ['IG_CREDS_B64']).decode())
+              for attempt in range(3):
+                  try:
+                      cr = requests.post(
+                          f"https://graph.facebook.com/v21.0/{c['igUserId']}/media",
+                          json={'media_type': 'REELS', 'video_url': video_url, 'caption': full_caption, 'access_token': c['accessToken']},
+                          timeout=30,
+                      ).json()
+                      if cr.get('error'):
+                          if cr['error'].get('code') == 190:
+                              token_expired = True
+                          raise RuntimeError(str(cr['error'].get('message')))
+                      cid = cr['id']
+                      for _ in range(28):
+                          time.sleep(5)
+                          st = requests.get(f"https://graph.facebook.com/v21.0/{cid}?fields=status_code&access_token={c['accessToken']}", timeout=20).json().get('status_code')
+                          if st == 'FINISHED':
+                              break
+                          if st == 'ERROR':
+                              raise RuntimeError('Meta processing error')
+                      pub = requests.post(
+                          f"https://graph.facebook.com/v21.0/{c['igUserId']}/media_publish",
+                          json={'creation_id': cid, 'access_token': c['accessToken']},
+                          timeout=30,
+                      ).json()
+                      if pub.get('error'):
+                          if pub['error'].get('code') == 190:
+                              token_expired = True
+                          raise RuntimeError(str(pub['error'].get('message')))
+                      ig_media_id = str(pub.get('id', ''))
+                      ig_url = f"https://instagram.com/reel/{ig_media_id}" if ig_media_id else ''
+                      err = ''
+                      break
+                  except Exception as e:
+                      err = f'IG(try {attempt + 1}): {e}'
+                      if token_expired or attempt == 2:
+                          break
+                      time.sleep(8 * (attempt + 1))
+
+          cb = {
+              'job_id': os.environ['JOB_ID'],
+              'format': fmt,
+              'cb_token': p.get('cb_token', ''),
+              'status': 'published' if ig_media_id else 'failed',
+              'ig_media_id': ig_media_id,
+              'ig_url': ig_url,
+              'video_url': video_url,
+              'token_expired': token_expired,
+              'error': err,
+              'is_approved_publish': True,
+          }
+          requests.post(p.get('callback_url', ''), headers={'x-callback-secret': os.environ.get('CB_SECRET', ''), 'x-cb-token': p.get('cb_token', '')}, json=cb, timeout=30)
           PYEOF
