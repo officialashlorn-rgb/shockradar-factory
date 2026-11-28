@@ -16,8 +16,8 @@ const RemotionRoot = () => {
         height: 1920,
         fps: 30,
         durationInFrames: 900,
-        mode: 'promo',
-        template: 'UiMotionPromo',
+        format: 'smart_ad',
+        template: 'StoryAdFlow',
         palette: {
           bg: '#0B0E14',
           surface: '#141923',
@@ -29,7 +29,6 @@ const RemotionRoot = () => {
         brandName: 'ShockRadar AI',
         siteHost: 'shockradarai.pages.dev',
         autoDmKeyword: '1',
-        speakerLabels: { A: 'FOMO TRADER', B: 'QUANT SYSTEM' },
         tradeProof: null,
         scenes: [],
         words: [],
