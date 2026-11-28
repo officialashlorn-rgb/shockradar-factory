@@ -163,8 +163,8 @@ const StoryArtScene = ({ scene, durFrames, palette, showChapterPill }) => {
   let scale = 1.06;
   let tx = 0;
   let ty = 0;
-  if (motion === 'push_in') scale = interpolate(progress, [0, 1], [1.0, 1.15]);
-  else if (motion === 'pull_out') scale = interpolate(progress, [0, 1], [1.16, 1.02]);
+  if (motion === 'push_in') scale = interpolate(progress, [0, 1], [1.0, 1.15], { easing: Easing.inOut(Easing.sin) });
+  else if (motion === 'pull_out') scale = interpolate(progress, [0, 1], [1.16, 1.02], { easing: Easing.inOut(Easing.sin) });
   else if (motion === 'pan_up') { scale = 1.16; ty = interpolate(progress, [0, 1], [48, -48]); }
   else if (motion === 'snap_zoom') scale = interpolate(progress, [0, 0.16, 1], [1.0, 1.18, 1.22], { easing: Easing.out(Easing.cubic) });
   else { scale = 1.12; tx = interpolate(progress, [0, 1], [-26, 26]); }
@@ -815,6 +815,10 @@ export const VideoComposition = (props) => {
           </Sequence>
         );
       })}
+      <AbsoluteFill style={{ pointerEvents: 'none', boxShadow: 'inset 0 0 180px rgba(0,0,0,0.68)' }} />
+      {frame < 12 && (
+        <AbsoluteFill style={{ pointerEvents: 'none', backgroundColor: palette.accent, opacity: interpolate(frame, [0, 12], [0.22, 0], { extrapolateRight: 'clamp' }) }} />
+      )}
       <TopProgressBar currentIdx={activeSceneIdx} total={scenes.length} accent={palette.accent} badgeText={badgeMap[format] || ''} />
       <CleanSubtitles words={props.words} accent={palette.accent} />
     </AbsoluteFill>
